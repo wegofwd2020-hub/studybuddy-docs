@@ -25,6 +25,9 @@ Tracks all decisions, design changes, and implementation milestones.
 | D-15 | TTS audio pre-generated in pipeline (Amazon Polly / Google TTS) | No per-request latency; audio cached offline with lesson JSON; provider swappable |
 | D-16 | Experiment visualization JSON generated only for lab units | Avoids generating empty content; mobile detects availability via HTTP 200/404 on content endpoint |
 | D-17 | Student streak stored in Redis, not computed from DB | Streak query over unbounded `progress_sessions` is expensive; Redis hash updated once per calendar day by Celery; dashboard reads only the hash |
+| D-20 | External auth (Auth0) for students and teachers; internal JWT issued after token exchange | Delegates password storage, brute-force defence, email verification, and password reset to Auth0; our backend never stores a student or teacher password hash |
+| D-21 | Local bcrypt auth for internal product team (developer/tester/product_admin/super_admin) | Internal tooling must not depend on external provider uptime; `ADMIN_JWT_SECRET` is separate to prevent credential cross-use |
+| D-22 | Suspension enforced via Redis set in auth middleware; Auth0 block is best-effort async | Avoids DB query on every authenticated request; 15-min TTL matches JWT lifetime for instant effective revocation |
 | D-18 | Student dashboard cached at L1+L2 (60 s TTL), invalidated on session end | Dashboard is read on every app open; caching eliminates DB fan-out on hot path; short TTL ensures freshness |
 | D-19 | `/student/*` report endpoints derive student_id exclusively from JWT | Prevents one student accessing another's progress; no client-supplied student_id accepted |
 
@@ -102,6 +105,19 @@ Tracks all decisions, design changes, and implementation milestones.
 - AGENTS.md: added BACKEND_ARCHITECTURE.md reference line; added pitfalls 31–35
   (event loop blocking, audio proxying, connection pool sizing, CDN invalidation, Redis
   AOF persistence); added Performance conventions section; updated Phase 1/2/4 checklists
+
+### Authentication Architecture + Account Management (this session)
+- ARCHITECTURE.md: added "Authentication Architecture" section — two-track auth diagram,
+  token exchange sequence diagram, account status lifecycle state diagram; updated Auth
+  API endpoints table (exchange, teacher/exchange, admin/auth/*); added Account Management
+  API endpoints table; updated STUDENT/TEACHER data models (external_auth_id, auth_provider,
+  account_status replacing password_hash); added ADMIN_USER to ERD; updated Phase 1
+- REQUIREMENTS.md: replaced FR-AUTH with 14 updated requirements reflecting external auth
+  pattern; added FR-ACCTMGMT (10 requirements); added ADR-022/023/024
+- AGENTS.md: added pitfalls 42–44 (JWKS caching, raw id_token on non-exchange endpoints,
+  account_status DB query in middleware); expanded Phase 1 checklist with Auth0 integration,
+  token exchange, admin auth, suspension enforcement
+- CHANGES.md: added D-20/D-21/D-22
 
 ### Student Progress Reports (this session)
 - ARCHITECTURE.md: added "Student Progress Reports" section — 3 new endpoints

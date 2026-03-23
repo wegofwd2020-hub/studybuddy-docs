@@ -21,16 +21,35 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-AUTH-001 | Student registration with name, email, password, grade, locale | P0 | 1 | accepted |
-| FR-AUTH-002 | Student login with email + password → JWT | P0 | 1 | accepted |
-| FR-AUTH-003 | JWT issue and refresh; locale + grade embedded in payload | P0 | 1 | accepted |
-| FR-AUTH-004 | Email verification on registration (confirm before first login) | P1 | 1 | proposed |
-| FR-AUTH-005 | Password reset: `POST /auth/forgot-password` → email link → `POST /auth/reset-password` | P0 | 1 | proposed |
-| FR-AUTH-006 | Account deletion: `DELETE /auth/account` removes all student data (GDPR) | P0 | 5 | proposed |
-| FR-AUTH-007 | Student profile update: `PATCH /student/profile` (name, locale, grade) | P1 | 3 | proposed |
-| FR-AUTH-008 | Account lockout after 5 consecutive failed login attempts (15-minute cooldown) | P1 | 1 | proposed |
-| FR-AUTH-009 | JWT signing key rotation with `kid` header for zero-downtime key rollover | P1 | 2 | proposed |
-| FR-AUTH-010 | Parental consent flow for students under 13 (COPPA) — guardian email + consent record | P0 | 1 | proposed |
+| FR-AUTH-001 | Students and teachers authenticate via external provider (Auth0); backend issues internal JWT after token exchange | P0 | 1 | proposed |
+| FR-AUTH-002 | `POST /auth/exchange` accepts Auth0 `id_token`, verifies against JWKS (L1-cached), upserts student record, returns internal JWT + refresh token | P0 | 1 | proposed |
+| FR-AUTH-003 | `POST /auth/teacher/exchange` — same pattern; issues `{teacher_id, school_id, role}` JWT | P0 | 1 | proposed |
+| FR-AUTH-004 | Internal JWT payload: `{student_id, grade, locale, role, exp}` (student) or `{teacher_id, school_id, role, exp}` (teacher); locale always from DB record, never from Auth0 token | P0 | 1 | proposed |
+| FR-AUTH-005 | `POST /auth/refresh` exchanges refresh token (Redis, 30-day TTL) for new internal JWT; no Auth0 call required | P0 | 1 | proposed |
+| FR-AUTH-006 | `POST /auth/forgot-password` calls Auth0 Management API to trigger password reset email; always returns 200; no reset tokens stored in our DB for external-auth users | P0 | 1 | proposed |
+| FR-AUTH-007 | Email verification and brute-force protection delegated to Auth0; no local implementation required for students/teachers | P0 | 1 | proposed |
+| FR-AUTH-008 | Internal product team (developer, tester, product_admin, super_admin) authenticate via `POST /admin/auth/login` with bcrypt-verified local credentials; `ADMIN_JWT_SECRET` is separate from student/teacher secrets | P0 | 1 | proposed |
+| FR-AUTH-009 | `POST /admin/auth/forgot-password` stores one-time reset token in Redis (TTL 1 hr); `POST /admin/auth/reset-password` validates and sets new bcrypt hash | P0 | 1 | proposed |
+| FR-AUTH-010 | No password hash stored for students or teachers; `password_hash` column absent from `students` and `teachers` tables | P0 | 1 | proposed |
+| FR-AUTH-011 | Auth0 JWKS cached in L1 TTLCache (24-hr TTL); JWKS refresh triggered on `kid` mismatch; never fetched on every request | P1 | 1 | proposed |
+| FR-AUTH-012 | Parental consent flow for students under 13 (COPPA): Auth0 blocks signup under-13; consent collected externally before account activation | P0 | 1 | proposed |
+| FR-AUTH-013 | `DELETE /auth/account` deletes student PII and queues Celery task to delete Auth0 user record (GDPR) | P0 | 5 | proposed |
+| FR-AUTH-014 | Student profile update: `PATCH /student/profile` (name, locale, grade) updates our DB record; locale change invalidates cached JWT content | P1 | 3 | proposed |
+
+### FR-ACCTMGMT: Account Management
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| FR-ACCTMGMT-001 | All user types (student, teacher, school) carry `account_status`: `pending \| active \| suspended \| deleted` | P0 | 1 | proposed |
+| FR-ACCTMGMT-002 | Auth middleware checks Redis `suspended:{id}` set after JWT signature verification; suspended accounts receive `403 Forbidden`; zero DB queries on hot path | P0 | 1 | proposed |
+| FR-ACCTMGMT-003 | On suspension, `id` added to Redis `suspended:{id}` (TTL = max JWT lifetime, 15 min); on reactivation, key deleted from Redis | P0 | 1 | proposed |
+| FR-ACCTMGMT-004 | On suspension, Celery task calls Auth0 Management API to block the external user (`{"blocked": true}`), preventing re-login; our `account_status` is authoritative | P1 | 1 | proposed |
+| FR-ACCTMGMT-005 | `PATCH /admin/accounts/students/{id}/status` and equivalent teacher/school endpoints; accessible only by `product_admin` or `super_admin` JWT | P0 | 1 | proposed |
+| FR-ACCTMGMT-006 | Suspending a school cascades: all teachers and students of that school suspended via Celery task; each added to Redis `suspended:{id}` set individually | P1 | 1 | proposed |
+| FR-ACCTMGMT-007 | Schools and teachers (school_admin role) can suspend/reactivate their own students and teachers via `PATCH /schools/{school_id}/students/{id}/status` and `PATCH /schools/{school_id}/teachers/{id}/status`; cannot suspend students belonging to other schools | P1 | 8 | proposed |
+| FR-ACCTMGMT-008 | `DELETE /admin/accounts/students/{id}` soft-deletes the record; Celery task anonymises PII within 30 days per GDPR | P0 | 5 | proposed |
+| FR-ACCTMGMT-009 | Admin account management list endpoints support pagination, `status` filter, `school_id` filter, and free-text `q` search on name/email | P1 | 1 | proposed |
+| FR-ACCTMGMT-010 | Internal admin account lockout: 5 failed login attempts → 15-minute Redis-backed cooldown (same pattern as Auth0 brute-force, applied locally for admin users) | P1 | 1 | proposed |
 
 ---
 
@@ -437,6 +456,9 @@
 | ADR-019 | All report queries route to PostgreSQL read replica via materialized views | Report aggregations are expensive; running them on the primary would compete with write-path queries and entitlement lookups that students depend on | 2026-03-23 | proposed |
 | ADR-020 | Materialized views refreshed nightly (not real-time) with 24-hour stale tolerance for most reports | Real-time aggregation would require expensive incremental computation on every event; nightly refresh is accurate enough for teacher planning and avoids write amplification | 2026-03-23 | proposed |
 | ADR-021 | Feedback summary refreshed hourly (not nightly) | Feedback is time-sensitive — a content error reported by students should be visible to a teacher within the hour, not the next morning | 2026-03-23 | proposed |
+| ADR-022 | External auth (Auth0) for students and teachers; backend issues internal JWT after token exchange | Removes password storage and brute-force defence from our codebase; Auth0 handles MFA, social login, COPPA age-gate, and password reset email delivery; provider is swappable (Cognito, Firebase) by changing the JWKS URL and exchange logic | 2026-03-23 | proposed |
+| ADR-023 | Local bcrypt auth for internal product team; separate `ADMIN_JWT_SECRET` | Internal tooling must not depend on external provider availability; admin credentials are provisioned manually and tightly controlled; separate secret ensures a compromised student JWT cannot be replayed on admin endpoints | 2026-03-23 | proposed |
+| ADR-024 | Suspension check via Redis set in auth middleware; Auth0 block is best-effort sync | Checking `account_status` in PostgreSQL on every request would add a DB query to the hot path; Redis set (15-min TTL matching JWT lifetime) gives instant revocation with zero DB impact; Auth0 block prevents re-login after JWT expires | 2026-03-23 | proposed |
 
 ---
 

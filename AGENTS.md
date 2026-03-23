@@ -311,6 +311,9 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 37. **Refreshing all materialized views on every report request** — `REFRESH MATERIALIZED VIEW` takes a write lock and can take seconds on large tables. Only Celery Beat should trigger routine refreshes (nightly). The on-demand refresh endpoint (`POST /reports/.../refresh`) must be rate-limited (once per 30 minutes per school) and dispatched as a Celery task, never awaited synchronously.
 38. **Not showing the "last updated" timestamp on reports** — materialized views are stale by design (up to 24 hours). Without a visible timestamp, teachers may act on yesterday's data thinking it is current. Always include `data_as_of: ISO8601` in every report response body.
 39. **Sending weekly digest emails in a single synchronous loop** — the digest task may need to send to hundreds of teachers. Dispatch one Celery sub-task per recipient (`send_digest_email.apply_async(args=[teacher_id])`). Never block the Beat task waiting for email delivery.
+42. **Fetching Auth0 JWKS on every token exchange request** — the JWKS endpoint is a remote HTTP call. Cache the key set in L1 TTLCache with a 24-hour TTL; refresh only on `kid` mismatch (unknown key ID). Never hit the JWKS endpoint inline on the student login hot path.
+43. **Using the external Auth0 `id_token` directly on content or progress endpoints** — the `id_token` does not contain `grade`, `locale`, `school_id`, or `account_status`. Always complete the token exchange first and use the internal JWT for all subsequent requests. Middleware that accepts raw Auth0 tokens on non-exchange endpoints is a security gap.
+44. **Checking `account_status` in PostgreSQL inside the auth middleware** — this adds a DB query to every authenticated request. Store suspension state in a Redis set (`suspended:{id}`, TTL = JWT lifetime). The middleware reads only from Redis after signature verification; PostgreSQL is never queried on the hot path for status checks.
 40. **Computing learning streaks from raw `progress_sessions` on every dashboard request** — a streak query scans every session row for the student, which grows unboundedly. Store `{current, longest, last_active_date}` in a Redis hash (`streak:{student_id}`) and update it via a Celery task on the first progress event of each calendar day. The dashboard reads only the Redis hash — zero DB queries for streak data.
 41. **Returning another student's progress from `/student/dashboard` or `/student/progress`** — these endpoints must compare the `student_id` extracted from the JWT against the owner of the requested data. Never rely on a `student_id` query parameter; derive it exclusively from the verified JWT payload.
 
@@ -320,18 +323,25 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 
 ### Phase 1 — Backend Foundation
 - [ ] FastAPI skeleton with `/health` (deep check: DB + Redis + Content Store)
-- [ ] PostgreSQL schema: `students`, `sessions`
+- [ ] PostgreSQL schema: `students`, `teachers`, `admin_users`, `sessions`
 - [ ] Alembic migration scaffold; all schema changes via migrations
-- [ ] Auth endpoints: register (with `locale`, `dob` for COPPA), login, refresh
-- [ ] Auth endpoints: forgot-password, reset-password
-- [ ] Parental consent flow: block account activation for under-13 until guardian consent
-- [ ] Rate limiting middleware on auth endpoints (10 req/min per IP)
-- [ ] Account lockout: 5 failed logins → 15-minute Redis-backed cooldown
+- [ ] Auth0 tenant configured; JWKS URL in `config.py`; JWKS cached in L1 TTLCache (24-hr TTL)
+- [ ] `POST /auth/exchange` — verify Auth0 id_token → upsert student → issue internal JWT + refresh token
+- [ ] `POST /auth/teacher/exchange` — same pattern for teachers
+- [ ] `POST /auth/refresh` — Redis refresh token → new internal JWT; no Auth0 call
+- [ ] `POST /auth/forgot-password` — calls Auth0 Management API; always returns 200
+- [ ] `POST /admin/auth/login` — bcrypt verify in executor → admin JWT (ADMIN_JWT_SECRET)
+- [ ] `POST /admin/auth/forgot-password` + `POST /admin/auth/reset-password` — Redis one-time token (TTL 1 hr)
+- [ ] Admin account lockout: 5 failed logins → 15-minute Redis cooldown
+- [ ] `account_status` field on `students`, `teachers`, `schools`; auth middleware checks Redis `suspended:{id}`
+- [ ] PATCH status endpoints for students/teachers/schools (product_admin/super_admin only)
+- [ ] Cascade suspension: suspending a school suspends all its teachers/students via Celery task
+- [ ] Auth0 block sync on suspension via Celery best-effort task
+- [ ] Parental consent flow: Auth0 age-gate for under-13; block content until `account_status = active`
 - [ ] Curriculum endpoints: list grades, get grade detail
 - [ ] `PATCH /student/profile` endpoint
-- [ ] `DELETE /auth/account` endpoint (GDPR erasure)
-- [ ] Mobile: replace local registration with backend auth (include language picker)
-- [ ] Mobile: JWT stored securely; locale read from JWT; sent on every request
+- [ ] `DELETE /auth/account` endpoint (queues GDPR erasure + Auth0 user deletion)
+- [ ] Mobile: Auth0 SDK integration; exchange → store internal JWT securely; locale from JWT
 - [ ] Sentry SDK initialised in backend and mobile
 - [ ] CORS policy configured via `ALLOWED_ORIGINS` env var
 - [ ] HTTPS enforced; HTTP → HTTPS redirect configured

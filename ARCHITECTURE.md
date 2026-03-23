@@ -521,21 +521,153 @@ sequenceDiagram
 
 ---
 
+## Authentication Architecture
+
+### Two-Track Auth Model
+
+Authentication is split by user type. Students and teachers use an external provider (Auth0). Internal product team members — developers, testers, product admins, and super admins — use a local credential store within the application.
+
+```mermaid
+flowchart TD
+    subgraph External["External Auth (Auth0)"]
+        STU["Student\nMobile App"]
+        TCH["Teacher\nDashboard"]
+    end
+    subgraph Internal["Local Auth (In-App)"]
+        DEV["Developer / Tester\nAdmin Dashboard"]
+        ADM["Product Admin\nSuper Admin"]
+    end
+
+    STU -->|"id_token\nPOST /auth/exchange"| BE["Backend"]
+    TCH -->|"id_token\nPOST /auth/teacher/exchange"| BE
+    DEV -->|"email + password\nPOST /admin/auth/login"| BE
+    ADM -->|"email + password\nPOST /admin/auth/login"| BE
+
+    BE -->|"Internal JWT\n{student_id, grade, locale, role}"| STU
+    BE -->|"Internal JWT\n{teacher_id, school_id, role}"| TCH
+    BE -->|"Admin JWT\n{admin_id, role}"| DEV
+    BE -->|"Admin JWT\n{admin_id, role: super_admin}"| ADM
+
+    style External fill:#1a2a4a,color:#e2e8f0
+    style Internal fill:#2a1a1a,color:#e2e8f0
+```
+
+### Track 1 — External Auth (Students & Teachers)
+
+Auth0 handles credential storage, email verification, brute-force protection, and password reset email delivery. The backend never stores a password hash for students or teachers.
+
+**Token Exchange Flow:**
+
+```mermaid
+sequenceDiagram
+    participant App as Mobile App / Browser
+    participant Auth0 as Auth0
+    participant BE as Backend API
+    participant DB as PostgreSQL
+
+    App->>Auth0: Open login UI (SDK or Universal Login redirect)
+    Auth0-->>App: id_token (OIDC JWT signed by Auth0)
+    App->>BE: POST /auth/exchange  {id_token}
+    BE->>BE: Verify id_token against Auth0 JWKS\n(cached in L1 TTLCache, 24 hr TTL)
+    BE->>DB: Upsert student by external_auth_id\n(create on first login)
+    BE->>BE: Check account_status — reject if suspended
+    BE-->>App: Internal JWT {student_id, grade, locale, role: "student", exp: +15min}\n+ refresh_token (Redis, 30-day TTL)
+    Note over App,BE: All subsequent calls use the internal JWT only
+```
+
+- `POST /auth/teacher/exchange` — same flow; issues `{teacher_id, school_id, role}` JWT
+- `POST /auth/refresh` — exchanges refresh token for new internal JWT; no Auth0 call needed
+- **Password reset** — triggered by `POST /auth/forgot-password`, which calls Auth0 Management API to send the reset email. Auth0 handles the entire email-link-form flow. No reset tokens stored in our DB for external-auth users.
+- **No passwords stored** — `password_hash` column is absent from `students` and `teachers` tables. Auth0 is the single source of credential truth for these users.
+
+### Track 2 — Local Auth (Internal Product Team)
+
+Internal users are stored in the `admin_users` table. Authentication is fully self-contained; no external provider dependency.
+
+| Role | Description |
+|---|---|
+| `developer` | Engineering team; read access to all admin endpoints |
+| `tester` | QA team; can trigger content regeneration and view all data |
+| `product_admin` | Can activate/deactivate accounts, manage schools |
+| `super_admin` | Full access; can manage admin users |
+
+- `POST /admin/auth/login` → bcrypt verify (in thread pool executor) → admin JWT signed with `ADMIN_JWT_SECRET` (separate from student/teacher secret)
+- `POST /admin/auth/forgot-password` → one-time reset token stored in Redis (TTL 1 hr) → email link → `POST /admin/auth/reset-password`
+- Account lockout: 5 failed attempts → 15-minute Redis-backed cooldown (same pattern as existing rate limiting)
+- TOTP / MFA: optional field `totp_secret` in `admin_users`; enforced at `super_admin` level (Phase 7+)
+
+### Account Status Lifecycle
+
+All user types — students, teachers, schools — carry an `account_status` field.
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending : registered / invited
+    pending --> active : email verified\n(+parental consent if under-13)
+    active --> suspended : admin or school suspends
+    suspended --> active : admin reactivates
+    active --> deleted : GDPR deletion request\nor admin hard-delete
+    suspended --> deleted : admin hard-delete
+```
+
+| Status | Access |
+|---|---|
+| `pending` | Login allowed; content blocked (must verify first) |
+| `active` | Full access per entitlement |
+| `suspended` | JWT rejected with `403 Forbidden`; added to Redis `suspended:{id}` set |
+| `deleted` | Soft-deleted; PII anonymised on 30-day GDPR schedule; JWT always rejected |
+
+**Suspension JWT revocation:** on suspension, `student_id` / `teacher_id` is added to Redis key `suspended:{id}` (TTL = max JWT lifetime, 15 min). Auth middleware checks this set immediately after signature verification — zero DB queries on hot path.
+
+**Auth0 sync on suspension:** a Celery task calls Auth0 Management API `PATCH /api/v2/users/{external_auth_id}` with `{"blocked": true}`. This prevents re-login even if the internal JWT has expired. Our `account_status` is authoritative; Auth0 sync is best-effort.
+
+---
+
 ## API Design
 
-All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subscription/webhook`.
+All endpoints require `Authorization: Bearer <jwt>` except `/auth/*`, `/admin/auth/*`, and `/subscription/webhook`.
 
-### Auth
+### Auth — Students (External Provider)
 
 | Method | Endpoint | Body | Returns |
 |---|---|---|---|
-| POST | `/auth/register` | `{name, email, password, grade, locale, dob?}` | `{token, student_id}` |
-| POST | `/auth/login` | `{email, password}` | `{token, student_id}` |
-| POST | `/auth/refresh` | — | `{token}` |
-| POST | `/auth/forgot-password` | `{email}` | `200` (always; no email enumeration) |
-| POST | `/auth/reset-password` | `{token, new_password}` | `{token, student_id}` |
+| POST | `/auth/exchange` | `{id_token}` | `{token, refresh_token, student_id}` |
+| POST | `/auth/teacher/exchange` | `{id_token}` | `{token, refresh_token, teacher_id}` |
+| POST | `/auth/refresh` | `{refresh_token}` | `{token}` |
+| POST | `/auth/forgot-password` | `{email}` | `200` (always; triggers Auth0 reset email) |
 | PATCH | `/student/profile` | `{name?, locale?, grade?}` | `{student}` |
-| DELETE | `/auth/account` | — | `200` (GDPR erasure) |
+| DELETE | `/auth/account` | — | `200` (GDPR erasure + Auth0 user deletion) |
+
+### Auth — Internal Product Team (Local)
+
+| Method | Endpoint | Body | Returns |
+|---|---|---|---|
+| POST | `/admin/auth/login` | `{email, password}` | `{token, admin_id}` |
+| POST | `/admin/auth/refresh` | `{refresh_token}` | `{token}` |
+| POST | `/admin/auth/forgot-password` | `{email}` | `200` (always) |
+| POST | `/admin/auth/reset-password` | `{token, new_password}` | `200` |
+
+### Account Management (product_admin / super_admin only)
+
+| Method | Endpoint | Body | Returns |
+|---|---|---|---|
+| GET | `/admin/accounts/students` | — `?status=&school_id=&q=&page=` | Paginated student list |
+| GET | `/admin/accounts/students/{id}` | — | Student detail |
+| PATCH | `/admin/accounts/students/{id}/status` | `{status: active\|suspended}` | `{student}` |
+| DELETE | `/admin/accounts/students/{id}` | — | `202` (schedules GDPR deletion) |
+| GET | `/admin/accounts/teachers` | — `?status=&school_id=&page=` | Paginated teacher list |
+| PATCH | `/admin/accounts/teachers/{id}/status` | `{status: active\|suspended}` | `{teacher}` |
+| GET | `/admin/accounts/schools` | — `?status=&page=` | Paginated school list |
+| PATCH | `/admin/accounts/schools/{id}/status` | `{status: active\|suspended}` | `{school}` (cascades) |
+
+Suspending a school cascades: all teachers and students belonging to that school are suspended simultaneously via a Celery task. Each is added to the Redis `suspended:{id}` set individually.
+
+### Account Management — School Self-Service (teacher / school_admin)
+
+| Method | Endpoint | Body | Returns |
+|---|---|---|---|
+| PATCH | `/schools/{school_id}/students/{student_id}/status` | `{status: active\|suspended}` | `{student}` |
+| PATCH | `/schools/{school_id}/teachers/{teacher_id}/status` | `{status: active\|suspended}` | `{teacher}` |
 
 ### Curriculum
 
@@ -863,11 +995,13 @@ Key relationships between the core data entities.
 erDiagram
     STUDENT {
         uuid student_id PK
+        string external_auth_id "Auth0 sub claim"
+        string auth_provider "auth0"
         string name
         string email
-        string password_hash
         int grade
         string locale
+        string account_status "pending|active|suspended|deleted"
         uuid school_id FK
         timestamp enrolled_at
         int lessons_accessed
@@ -879,15 +1013,28 @@ erDiagram
         string contact_email
         string country
         string enrolment_code
-        string status
+        string status "active|suspended|deleted"
         timestamp created_at
     }
     TEACHER {
         uuid teacher_id PK
         uuid school_id FK
+        string external_auth_id "Auth0 sub claim"
+        string auth_provider "auth0"
         string name
         string email
-        string role
+        string role "teacher|school_admin"
+        string account_status "pending|active|suspended|deleted"
+        timestamp created_at
+    }
+    ADMIN_USER {
+        uuid admin_user_id PK
+        string email
+        string password_hash "bcrypt; local auth only"
+        string role "developer|tester|product_admin|super_admin"
+        string account_status "active|suspended|deleted"
+        string totp_secret "nullable; Phase 7+"
+        timestamp last_login_at
         timestamp created_at
     }
     CURRICULUM {
@@ -1902,18 +2049,23 @@ For the Teacher Dashboard, data may be up to 24 hours stale (nightly refresh). A
 ## Phased Implementation Plan
 
 ### Phase 1 — Backend Foundation
-**Goal:** Students can register and browse the curriculum without any Claude API calls on-device.
+**Goal:** Students can register via Auth0 and browse the curriculum. Internal team can log in locally.
 
 - FastAPI project skeleton with health check
-- PostgreSQL schema: `students`, `sessions`
-- `POST /auth/register` (includes `locale` field), `POST /auth/login`, `POST /auth/refresh`
+- PostgreSQL schema: `students`, `teachers`, `admin_users`, `sessions`
+- Auth0 tenant configured; JWKS endpoint cached in L1 TTLCache
+- `POST /auth/exchange` (student token exchange), `POST /auth/teacher/exchange`
+- `POST /auth/refresh` (internal JWT refresh; no Auth0 call)
+- `POST /auth/forgot-password` (delegates to Auth0 Management API)
+- `POST /admin/auth/login`, `POST /admin/auth/forgot-password`, `POST /admin/auth/reset-password`
+- Account management endpoints: status PATCH for students, teachers, schools
+- `account_status` check in JWT auth middleware (Redis `suspended:{id}` set)
+- Auth0 sync on suspension via Celery task
 - `GET /curriculum`, `GET /curriculum/{grade}` (serves existing JSON files)
-- Mobile app: replace local registration flow with backend auth; include language selection at registration
-- JWT storage on device (keystore / secure file); locale included in JWT payload
-- Configure PgBouncer in Docker Compose; asyncpg connection pools
-- asyncpg and aioredis pools initialised in FastAPI lifespan context manager (once per worker)
+- Mobile: Auth0 SDK integration; JWT stored securely; locale from internal JWT
+- Configure PgBouncer in Docker Compose; asyncpg + aioredis pools in lifespan context
 
-**Milestone:** Student registers with language preference, logs in, and browses grade/subject/topic — all served from backend, no Anthropic calls.
+**Milestone:** Student logs in via Auth0, browses curriculum. Admin suspends a student account; student JWT is rejected immediately. Internal team logs in with local credentials.
 
 ---
 
