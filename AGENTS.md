@@ -311,6 +311,8 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 37. **Refreshing all materialized views on every report request** — `REFRESH MATERIALIZED VIEW` takes a write lock and can take seconds on large tables. Only Celery Beat should trigger routine refreshes (nightly). The on-demand refresh endpoint (`POST /reports/.../refresh`) must be rate-limited (once per 30 minutes per school) and dispatched as a Celery task, never awaited synchronously.
 38. **Not showing the "last updated" timestamp on reports** — materialized views are stale by design (up to 24 hours). Without a visible timestamp, teachers may act on yesterday's data thinking it is current. Always include `data_as_of: ISO8601` in every report response body.
 39. **Sending weekly digest emails in a single synchronous loop** — the digest task may need to send to hundreds of teachers. Dispatch one Celery sub-task per recipient (`send_digest_email.apply_async(args=[teacher_id])`). Never block the Beat task waiting for email delivery.
+40. **Computing learning streaks from raw `progress_sessions` on every dashboard request** — a streak query scans every session row for the student, which grows unboundedly. Store `{current, longest, last_active_date}` in a Redis hash (`streak:{student_id}`) and update it via a Celery task on the first progress event of each calendar day. The dashboard reads only the Redis hash — zero DB queries for streak data.
+41. **Returning another student's progress from `/student/dashboard` or `/student/progress`** — these endpoints must compare the `student_id` extracted from the JWT against the owner of the requested data. Never rely on a `student_id` query parameter; derive it exclusively from the verified JWT payload.
 
 ---
 
@@ -368,7 +370,15 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] Progress endpoints: session, answer, session/end
 - [ ] Mobile: events posted after each answer
 - [ ] Mobile: result screen shows backend-confirmed score
-- [ ] `GET /progress/student` returns full history
+- [ ] `GET /progress/student` returns full raw history
+- [ ] `GET /student/dashboard` — aggregated summary card (streak, completion %, next unit, recent activity)
+- [ ] `GET /student/progress` — curriculum map with per-unit status badges (`not_started`, `in_progress`, `needs_retry`, `completed`)
+- [ ] `GET /student/stats?period=7d|30d|all` — usage statistics including daily_activity[]
+- [ ] Streak counter initialised in Redis on first progress event; Celery task increments on first event per calendar day
+- [ ] Materialized view `mv_student_curriculum_progress` created and refreshed async on session end
+- [ ] Dashboard response cached at L1 + L2; invalidated on `POST /progress/session/end`
+- [ ] JWT ownership check: `/student/*` endpoints reject requests where JWT `student_id` ≠ data owner
+- [ ] Mobile: `ProgressDashboardScreen`, `CurriculumMapScreen`, `StatsScreen`
 
 ### Phase 4 — Offline Sync + Multi-language + TTS
 - [ ] SQLite event queue on device

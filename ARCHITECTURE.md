@@ -1455,6 +1455,143 @@ Already tracked via `POST /progress/session` / `POST /progress/session/end`. The
 
 ---
 
+## Student Progress Reports
+
+Students have three self-service report endpoints that power a dedicated Progress section in the mobile app. All data is the student's own — no cross-student data is ever exposed.
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/student/dashboard` | Summary card: streak, completion %, next unit, recent activity |
+| GET | `/student/progress` | Full curriculum map with per-unit status badges and pending list |
+| GET | `/student/stats?period=7d\|30d\|all` | Usage statistics: time, quiz counts, audio plays, daily activity |
+
+### Report 1 — Progress Dashboard
+
+**Endpoint:** `GET /student/dashboard`
+
+Designed to be the first screen a student sees after login — shows where they are and what to do next.
+
+```json
+{
+  "summary": {
+    "units_completed": 12,
+    "quizzes_passed": 10,
+    "current_streak_days": 5,
+    "total_time_minutes": 320,
+    "avg_quiz_score": 78.4
+  },
+  "subject_progress": [
+    {"subject": "Mathematics", "units_total": 8, "units_completed": 3, "pct": 37.5},
+    {"subject": "Science",     "units_total": 6, "units_completed": 2, "pct": 33.3}
+  ],
+  "next_unit": {
+    "unit_id": "G8-MATH-004",
+    "title": "Algebraic Expressions",
+    "subject": "Mathematics",
+    "estimated_minutes": 20
+  },
+  "recent_activity": [
+    {"type": "quiz",   "unit_id": "G8-SCI-002",  "title": "Chemical Reactions", "score": 85, "at": "2026-03-22T14:30:00Z"},
+    {"type": "lesson", "unit_id": "G8-MATH-003", "title": "Linear Equations",   "at": "2026-03-21T10:00:00Z"}
+  ]
+}
+```
+
+**`next_unit` logic:** first unit in curriculum order with status `not_started` or `needs_retry`; falls back to any `in_progress` unit.
+
+**Performance:** L1/L2 cached (60 s TTL); cache key `dashboard:{student_id}`; invalidated on each `POST /progress/session/end` and on curriculum change.
+
+### Report 2 — Curriculum Progress Map
+
+**Endpoint:** `GET /student/progress`
+
+Shows the complete curriculum with a status badge per unit. Gives the student a clear picture of what is done, what needs a retry, and what is still ahead.
+
+```json
+{
+  "curriculum_id": "default-2026-g8",
+  "pending_count": 12,
+  "needs_retry_count": 2,
+  "subjects": [
+    {
+      "subject": "Mathematics",
+      "units_total": 8,
+      "units_completed": 3,
+      "units": [
+        {"unit_id": "G8-MATH-001", "title": "Number Systems",       "status": "completed",   "best_score": 90, "attempts": 1, "last_attempt_at": "2026-03-10T09:00:00Z"},
+        {"unit_id": "G8-MATH-002", "title": "Fractions & Decimals", "status": "needs_retry", "best_score": 45, "attempts": 2, "last_attempt_at": "2026-03-15T11:00:00Z"},
+        {"unit_id": "G8-MATH-003", "title": "Linear Equations",     "status": "in_progress", "best_score": null, "attempts": 0, "last_attempt_at": null},
+        {"unit_id": "G8-MATH-004", "title": "Algebraic Expressions","status": "not_started", "best_score": null, "attempts": 0, "last_attempt_at": null}
+      ]
+    }
+  ]
+}
+```
+
+**Status logic:**
+
+| Status | Condition |
+|---|---|
+| `completed` | `best_score ≥ QUIZ_PASS_THRESHOLD` (default 60 %) and at least 1 closed session |
+| `needs_retry` | At least 1 closed session but `best_score < QUIZ_PASS_THRESHOLD` |
+| `in_progress` | An open session exists (started, not yet ended) |
+| `not_started` | No sessions for this unit |
+
+**Performance:** backed by materialized view `mv_student_curriculum_progress` (per `student_id × unit_id`); refreshed nightly and on `POST /progress/session/end` via Celery task.
+
+### Report 3 — Usage Statistics
+
+**Endpoint:** `GET /student/stats?period=7d|30d|all`
+
+Gives the student insight into their platform usage — time invested, learning streaks, and day-by-day activity.
+
+```json
+{
+  "period": "30d",
+  "lessons_viewed": 14,
+  "quizzes_completed": 12,
+  "quizzes_passed": 10,
+  "avg_quiz_score": 78.4,
+  "total_time_minutes": 320,
+  "audio_plays": 8,
+  "streak_current_days": 5,
+  "streak_longest_days": 9,
+  "daily_activity": [
+    {"date": "2026-03-22", "lessons": 2, "quizzes": 1, "minutes": 35},
+    {"date": "2026-03-21", "lessons": 1, "quizzes": 2, "minutes": 45}
+  ]
+}
+```
+
+**Streak logic:** stored in Redis key `streak:{student_id}` as `{current, longest, last_active_date}`. Updated by the progress write path (Celery task) on the first activity of each calendar day. Never computed from raw DB rows on request.
+
+**`daily_activity`** is served from the `lesson_views` table (read replica), grouped by `DATE(started_at)`, for the requested period.
+
+### Mobile Screens
+
+| Screen | Route | Description |
+|---|---|---|
+| `ProgressDashboardScreen` | tapped from home "My Progress" button | Dashboard summary: streak badge, subject completion rings, Next Unit card, recent activity list |
+| `CurriculumMapScreen` | tapped from Progress Dashboard | Full subject/unit list with coloured status badges; tapping a unit navigates to lesson or quiz |
+| `StatsScreen` | tapped from Progress Dashboard | Period picker (7d / 30d / All time), stat cards, daily activity bar chart |
+
+### Architecture Flow
+
+```mermaid
+flowchart LR
+    MOB["Mobile App"] -->|"GET /student/dashboard\nGET /student/progress\nGET /student/stats"| API["Backend API"]
+    API --> L1["L1 TTLCache\n(dashboard, 60s)"]
+    L1 -->|miss| L2["Redis L2\n(streak counter\nentitlement)"]
+    L2 -->|miss| RR["PostgreSQL\nRead Replica\nmv_student_curriculum_progress\nlesson_views"]
+    PW["POST /progress/session/end"] -->|Celery task| INV["Invalidate\ndashboard:{student_id}\nRefresh mv_student_curriculum_progress"]
+    INV --> L1
+    INV --> L2
+```
+
+---
+
 ## Student Feedback
 
 ### Feedback Categories
@@ -1798,14 +1935,20 @@ For the Teacher Dashboard, data may be up to 24 hours stale (nightly refresh). A
 ---
 
 ### Phase 3 — Progress Tracking
-**Goal:** All quiz activity is recorded server-side.
+**Goal:** All quiz activity is recorded server-side; students have a self-service progress view.
 
 - Progress Service: session, answer, session/end endpoints
 - Mobile app: post progress events after each answer and on session end
-- `GET /progress/student` — student can see their own history
+- `GET /progress/student` — raw answer history
+- `GET /student/dashboard` — aggregated summary card (streak, completion %, next unit)
+- `GET /student/progress` — curriculum map with per-unit status badges
+- `GET /student/stats?period=7d|30d|all` — usage statistics with daily activity
+- Streak counter in Redis (`streak:{student_id}`); updated by Celery on first daily activity
+- Materialized view `mv_student_curriculum_progress` populated on first session end
+- Mobile: `ProgressDashboardScreen`, `CurriculumMapScreen`, `StatsScreen`
 - Result screen shows backend-confirmed score
 
-**Milestone:** A student can reinstall the app and see their full quiz history.
+**Milestone:** A student can reinstall the app, see their full quiz history, and know exactly which topics to tackle next.
 
 ---
 

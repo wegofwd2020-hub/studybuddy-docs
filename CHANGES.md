@@ -24,6 +24,9 @@ Tracks all decisions, design changes, and implementation milestones.
 | D-14 | Locale authoritative from JWT only | Prevents content language mismatch; students cannot request a language not on their account |
 | D-15 | TTS audio pre-generated in pipeline (Amazon Polly / Google TTS) | No per-request latency; audio cached offline with lesson JSON; provider swappable |
 | D-16 | Experiment visualization JSON generated only for lab units | Avoids generating empty content; mobile detects availability via HTTP 200/404 on content endpoint |
+| D-17 | Student streak stored in Redis, not computed from DB | Streak query over unbounded `progress_sessions` is expensive; Redis hash updated once per calendar day by Celery; dashboard reads only the hash |
+| D-18 | Student dashboard cached at L1+L2 (60 s TTL), invalidated on session end | Dashboard is read on every app open; caching eliminates DB fan-out on hot path; short TTL ensures freshness |
+| D-19 | `/student/*` report endpoints derive student_id exclusively from JWT | Prevents one student accessing another's progress; no client-supplied student_id accepted |
 
 ---
 
@@ -49,6 +52,10 @@ Tracks all decisions, design changes, and implementation milestones.
 | P-10 | `SubscriptionScreen` stub | 2 |
 | P-11 | Progress service endpoints | 3 |
 | P-12 | Mobile progress event posting | 3 |
+| P-28 | Student progress reports: `GET /student/dashboard`, `GET /student/progress`, `GET /student/stats` | 3 |
+| P-29 | Streak counter in Redis + Celery daily updater | 3 |
+| P-30 | Materialized view `mv_student_curriculum_progress` + async refresh on session end | 3 |
+| P-31 | Mobile: `ProgressDashboardScreen`, `CurriculumMapScreen`, `StatsScreen` | 3 |
 | P-13 | SQLite offline event queue + SyncManager | 4 |
 | P-14 | Backend event deduplication | 4 |
 | P-15 | Multi-language pipeline (`--lang fr,es`) | 4 |
@@ -95,5 +102,17 @@ Tracks all decisions, design changes, and implementation milestones.
 - AGENTS.md: added BACKEND_ARCHITECTURE.md reference line; added pitfalls 31–35
   (event loop blocking, audio proxying, connection pool sizing, CDN invalidation, Redis
   AOF persistence); added Performance conventions section; updated Phase 1/2/4 checklists
+
+### Student Progress Reports (this session)
+- ARCHITECTURE.md: added "Student Progress Reports" section — 3 new endpoints
+  (`GET /student/dashboard`, `GET /student/progress`, `GET /student/stats`), response
+  payloads, status logic table, mobile screens, architecture flow diagram; updated
+  Phase 3 milestone to include all three report endpoints and new mobile screens
+- REQUIREMENTS.md: added FR-SPRD section with 11 requirements (FR-SPRD-001 to FR-SPRD-011)
+  covering dashboard, curriculum map, usage stats, streak logic, caching, ownership checks
+- AGENTS.md: added pitfalls 40–41 (streak from raw DB, student_id from query param);
+  expanded Phase 3 checklist with all report endpoints, streak Redis setup,
+  materialized view, cache invalidation, and mobile screens
+- CHANGES.md: added design decisions D-17/D-18/D-19; added pending items P-28 to P-31
 
 *Last updated: 2026-03-23*

@@ -289,6 +289,22 @@
 | FR-RPT-016 | Teacher can filter Unit Performance and Feedback reports by subject, date range, and feedback category | P1 | 11 | proposed |
 | FR-RPT-017 | Curriculum Health recommended_action field: `none | review_content | add_class_time | report_to_admin` based on health tier and feedback count | P2 | 11 | proposed |
 
+### FR-SPRD: Student Progress Reports
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| FR-SPRD-001 | `GET /student/dashboard` returns: summary card (units_completed, quizzes_passed, current_streak_days, total_time_minutes, avg_quiz_score), subject_progress[], next_unit, recent_activity[] | P0 | 3 | proposed |
+| FR-SPRD-002 | `GET /student/progress` returns the full curriculum tree with per-unit status (`not_started`, `in_progress`, `needs_retry`, `completed`), best_score, attempts, and last_attempt_at | P0 | 3 | proposed |
+| FR-SPRD-003 | `GET /student/stats?period=7d\|30d\|all` returns lessons_viewed, quizzes_completed, quizzes_passed, avg_quiz_score, total_time_minutes, audio_plays, streak_current_days, streak_longest_days, daily_activity[] | P1 | 3 | proposed |
+| FR-SPRD-004 | Unit status `completed` requires `best_score ≥ QUIZ_PASS_THRESHOLD` (configurable, default 60 %) and at least one closed session; `needs_retry` requires ≥ 1 closed session with `best_score < threshold`; `in_progress` requires an open session; otherwise `not_started` | P0 | 3 | proposed |
+| FR-SPRD-005 | Daily learning streak stored in Redis (`streak:{student_id}`); incremented by Celery task on first progress event per calendar day; never computed from raw DB rows on request | P1 | 3 | proposed |
+| FR-SPRD-006 | `next_unit` in the dashboard is the first curriculum-ordered unit with status `not_started` or `needs_retry`; falls back to first `in_progress` unit; null if all units completed | P1 | 3 | proposed |
+| FR-SPRD-007 | Dashboard response cached at L1 (60 s TTL, key `dashboard:{student_id}`) and L2 Redis; invalidated on `POST /progress/session/end` and on curriculum change | P1 | 3 | proposed |
+| FR-SPRD-008 | Curriculum progress map backed by materialized view `mv_student_curriculum_progress` (per `student_id × unit_id`); refreshed on `POST /progress/session/end` via async Celery task | P1 | 3 | proposed |
+| FR-SPRD-009 | `daily_activity` in stats served from `lesson_views` table on read replica grouped by `DATE(started_at)`; never touches primary | P1 | 3 | proposed |
+| FR-SPRD-010 | Student progress endpoints (`/student/*`) must only return data belonging to the authenticated student; a student JWT must never access another student's progress — validated by comparing `student_id` from JWT against the data owner | P0 | 3 | proposed |
+| FR-SPRD-011 | Mobile app provides three screens: `ProgressDashboardScreen` (summary card + next unit + recent activity), `CurriculumMapScreen` (full subject/unit list with status badges), `StatsScreen` (period picker + stat cards + daily activity chart) | P1 | 3 | proposed |
+
 ---
 
 ## Non-Functional Requirements
