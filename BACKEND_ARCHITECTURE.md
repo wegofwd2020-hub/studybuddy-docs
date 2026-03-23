@@ -19,6 +19,65 @@ The backend has two fundamentally different traffic patterns that must be optimi
 
 Every architectural decision below derives from this separation. The hot read path must be optimised end-to-end. Writes must never block reads.
 
+### Logical Architecture
+
+The backend is structured as six horizontal layers. Dependencies flow downward only — no layer imports from a layer above it.
+
+```mermaid
+graph TB
+    subgraph EDGE_L["Edge Layer"]
+        CDN_L["CloudFront CDN\nAudio MP3s + static JSON files\nGlobal edge caching · signed URLs"]
+        NGX_L["nginx Reverse Proxy\nTLS termination · gzip compression\nRate limiting · keep-alive pooling\nHTTP→HTTPS redirect"]
+    end
+
+    subgraph APP_L["Application Layer  —  Stateless · Horizontally Scalable"]
+        subgraph WP1["Worker Process (uvicorn) × N"]
+            L1_L["L1 In-Process Cache\ncachetools TTLCache\nJWT keys · curriculum trees · config\n(ephemeral, per-process)"]
+            FAPI_L["FastAPI Routers + Middleware\nAuth · Content · Progress · Subscription\nSchool · Analytics · Feedback · Admin"]
+        end
+        GUN_L["gunicorn\nProcess manager\n2×vCPU+1 workers"]
+    end
+
+    subgraph CACHE_L["Cache Layer  —  Shared Across All Workers"]
+        RD_L["Redis Cluster\nEntitlement · Curriculum resolver\nContent JSON · Rate limiters\nJWT refresh tokens · Job state\nCelery broker + result backend"]
+    end
+
+    subgraph WORKER_L["Worker Layer  —  Async Background Jobs"]
+        CQ_L["Celery Queues\npipeline  ·  io  ·  default"]
+        CW_L["Celery Workers\nPipeline content generation\nEmail · Progress flush\nCache invalidation"]
+        CB_L["Celery Beat\nNightly: materialized view refresh\nHourly: content freshness check\nEvery 5min: stuck event flush"]
+    end
+
+    subgraph DB_L["Database Layer"]
+        PGB_L["PgBouncer\nTransaction-mode pooling\npool_size=50"]
+        PGP_L[("PostgreSQL Primary\nWrites + strong-consistency reads")]
+        PGR_L[("PostgreSQL Read Replica\nAnalytics queries · Reports")]
+        MV_L["Materialized Views\nmv_unit_struggle\nRefreshed nightly"]
+    end
+
+    subgraph CONTENT_L["Content Layer"]
+        S3_L["S3 Bucket\ncurricula/{curriculum_id}/{unit_id}/\nlesson_{lang}.json · quiz_set_{n}_{lang}.json\ntutorial_{lang}.json · lesson_{lang}.mp3"]
+    end
+
+    EDGE_L -->|"Routed requests"| APP_L
+    APP_L -->|"L2 cache reads/writes\nTask dispatch"| CACHE_L
+    APP_L -->|"Strong-read/write queries"| DB_L
+    APP_L -->|"Presigned URL generation"| CONTENT_L
+    CACHE_L -->|"Task queue"| WORKER_L
+    WORKER_L -->|"Pipeline writes\nAnalytics aggregation"| DB_L
+    WORKER_L -->|"Write generated content"| CONTENT_L
+    CDN_L -->|"Direct content fetch\n(bypasses App Layer)"| CONTENT_L
+    PGP_L -->|"Streaming replication"| PGR_L
+    PGR_L --> MV_L
+
+    style EDGE_L fill:#2a1a4a,color:#e2e8f0
+    style APP_L fill:#1e3a5f,color:#e2e8f0
+    style CACHE_L fill:#1a3a1a,color:#e2e8f0
+    style WORKER_L fill:#3a2a1a,color:#e2e8f0
+    style DB_L fill:#1a2a4a,color:#e2e8f0
+    style CONTENT_L fill:#3a1a1a,color:#e2e8f0
+```
+
 ---
 
 ## System Topology
@@ -164,6 +223,44 @@ sequenceDiagram
 | L1 | In-process (per worker) | Per-process, ephemeral | JWT keys, curriculum tree, grade JSON |
 | L2 | Redis | Shared across all workers | Entitlement, curriculum resolver, content, rate limits, sessions |
 | L3 | CDN (CloudFront) | Global edge | Audio MP3s, large static JSON files |
+
+### Cache Read Flow
+
+```mermaid
+flowchart LR
+    REQ_C["Request arrives\nat FastAPI worker"]
+
+    subgraph L1BOX["L1 — In-Process TTLCache\n(per worker, ~0ms)"]
+        L1_KEYS["JWT signing keys  TTL 1hr\nCurriculum trees  TTL 5min\nApp config / thresholds  TTL 1min"]
+    end
+
+    subgraph L2BOX["L2 — Redis Cluster\n(shared, ~1ms)"]
+        L2_ENT["ent:{student_id}  TTL 5min\nEntitlement + plan"]
+        L2_CUR["cur:{student_id}  TTL 5min\nCurriculum resolver result"]
+        L2_CON["content:{curriculum}:{unit}:{type}:{lang}\nLesson/quiz JSON  TTL 1hr"]
+        L2_RL["rl:auth:{ip} / rl:content:{student}\nRate limit counters  TTL 60s"]
+        L2_JWT["jwt_refresh:{token_hash}\nRefresh tokens  TTL = token expiry"]
+        L2_JOB["job:{job_id}\nPipeline job state  TTL 24hr"]
+    end
+
+    subgraph L3BOX["L3 — CloudFront CDN\n(global edge, ~5-30ms)"]
+        L3_JSON["lesson/quiz JSON\nCache-Control: max-age=3600"]
+        L3_MP3["lesson MP3 audio\nCache-Control: max-age=86400"]
+    end
+
+    subgraph ORIGIN["Origin (cache miss only)"]
+        PG_O[("PostgreSQL\n~5-20ms")]
+        S3_O[("S3\n~30-80ms")]
+    end
+
+    REQ_C --> L1BOX
+    L1BOX -->|"Miss"| L2BOX
+    L2BOX -->|"Miss (content)"| L3BOX
+    L2BOX -->|"Miss (entitlement/curriculum)"| PG_O
+    L3BOX -->|"Miss"| S3_O
+    PG_O -->|"Populate L2"| L2BOX
+    S3_O -->|"Populate L2 + L3"| L2BOX
+```
 
 ### L1 — In-Process Cache
 
@@ -396,6 +493,43 @@ CREATE UNIQUE INDEX ON mv_unit_struggle (unit_id, curriculum_id);
 -- Refresh nightly at 02:00 UTC (Celery Beat task)
 ```
 
+### Database Tier Component Diagram
+
+```mermaid
+graph TB
+    subgraph APP_TIER["Application Tier"]
+        API_POOL["FastAPI Workers\nasyncpg pool\nmin=5 max=20 per worker"]
+        CEL_POOL["Celery Workers\nasyncpg pool\nmin=2 max=10 per worker"]
+    end
+
+    subgraph PGB_TIER["PgBouncer  (transaction-pooling mode)"]
+        PGB_CFG["pool_size = 50\nserver_idle_timeout = 600s\npool_mode = transaction\nmax_client_conn = 200"]
+    end
+
+    subgraph PRIMARY["PostgreSQL Primary  (writes + strong reads)"]
+        HOT["Hot read tables\nstudents · subscriptions · curricula\nschool_enrolments"]
+        WRITE["Write tables\nsessions · progress_answers\nlesson_views · feedback\nstripe_events"]
+        IDX_P["Indexes\nidx_curricula_resolver (school, grade, year, status)\nidx_subscriptions_student (student_id) WHERE active\nidx_sessions_attempt_count (student, unit, curriculum)\nidx_enrolments_email (student_email) WHERE pending\nidx_stripe_events_id UNIQUE (stripe_event_id)"]
+    end
+
+    subgraph REPLICA["PostgreSQL Read Replica  (analytics + reports)"]
+        ANLQ["Analytics queries\nGET /analytics/school/{id}/class\nGET /analytics/unit/{id}/summary"]
+        MV_D["Materialized View\nmv_unit_struggle\n(pass rate · avg attempts · avg score)\nRefreshed nightly 02:00 UTC"]
+        IDX_R["Indexes\nidx_lesson_views_student (student_id, curriculum_id)\nidx_feedback_admin (category, reviewed, submitted_at)"]
+    end
+
+    API_POOL -->|"Write + strong reads"| PGB_CFG
+    CEL_POOL -->|"Pipeline writes"| PGB_CFG
+    PGB_CFG --> HOT & WRITE
+    API_POOL -->|"Analytics (direct, no PgBouncer)"| REPLICA
+    ANLQ --> MV_D
+    PRIMARY -->|"Streaming replication"| REPLICA
+
+    style PRIMARY fill:#1e3a5f,color:#e2e8f0
+    style REPLICA fill:#1a3a1a,color:#e2e8f0
+    style PGB_TIER fill:#2a2a1a,color:#e2e8f0
+```
+
 ---
 
 ## Background Worker Architecture
@@ -413,6 +547,54 @@ Celery Beat (scheduler)
   ├── Every night 02:00 UTC: refresh_materialized_views
   ├── Every hour:            check_content_freshness
   └── Every 5 min:           flush_stuck_progress_events  (safety net)
+```
+
+```mermaid
+graph TB
+    subgraph DISPATCH["Task Dispatch — FastAPI Workers"]
+        API_W2["FastAPI Worker\n.send_task(name, args, queue=...)"]
+    end
+
+    subgraph BROKER_W["Redis — Celery Broker"]
+        Q_PIPE["Queue: pipeline\nContent generation jobs"]
+        Q_IO["Queue: io\nEmail · Stripe callbacks"]
+        Q_DEF["Queue: default\nProgress flush · cache invalidation"]
+    end
+
+    subgraph PIPE_WORKERS["Pipeline Workers  (2–4, CPU+IO bound)"]
+        PW["celery worker -Q pipeline\n--concurrency=2"]
+        subgraph CHAIN["Task Chain per Curriculum"]
+            TC1["validate_curriculum"]
+            TC2["build_units.chunks\n5 units in parallel"]
+            TC3["build_unit\nlesson → quizzes (×3)\n→ tutorial → experiment\n→ TTS (MP3)"]
+            TC4["finalize_curriculum\nstatus=active · notify teacher"]
+        end
+        TC1 --> TC2 --> TC3 --> TC4
+    end
+
+    subgraph IO_WORKERS["IO Workers  (2, lightweight)"]
+        IW["celery worker -Q io,default\n--concurrency=4"]
+        IT1["send_email\n(SES / SendGrid)"]
+        IT2["flush_progress_events\nbulk INSERT ON CONFLICT DO NOTHING"]
+        IT3["invalidate_cache\nRedis DEL ent: / cur: keys"]
+        IT4["refresh_materialized_views\nCONCURRENTLY on replica"]
+    end
+
+    subgraph BEAT_W["Celery Beat — Scheduler"]
+        SCH1["02:00 UTC daily → refresh_materialized_views"]
+        SCH2["Every 1hr → check_content_freshness"]
+        SCH3["Every 5min → flush_stuck_progress_events"]
+    end
+
+    API_W2 --> Q_PIPE & Q_IO & Q_DEF
+    Q_PIPE --> PW
+    Q_IO & Q_DEF --> IW
+    IW --> IT1 & IT2 & IT3 & IT4
+    BEAT_W --> Q_IO & Q_DEF
+
+    style PIPE_WORKERS fill:#1e3a5f,color:#e2e8f0
+    style IO_WORKERS fill:#1a3a1a,color:#e2e8f0
+    style BEAT_W fill:#3a2a1a,color:#e2e8f0
 ```
 
 ### Pipeline Task Design
@@ -556,6 +738,30 @@ async def record_answer(
     return {"ok": True}
 ```
 
+```mermaid
+sequenceDiagram
+    participant App as Mobile App
+    participant GW as nginx
+    participant API as FastAPI Worker
+    participant RD as Redis (Celery Broker)
+    participant CW as Celery Worker
+    participant DB as PostgreSQL
+
+    App->>GW: POST /progress/answer {event_id, session_id, answer, correct, ms_taken}
+    GW->>API: Forward request
+    API->>API: Verify JWT (~0.1ms)
+    API->>API: Pydantic body validation (~0.5ms)
+    API->>RD: LPUSH queue:default {task: flush_progress_events, payload} (~1ms)
+    API-->>App: 200 OK {ok: true}   ← Returns immediately (total ~3ms)
+
+    Note over RD,DB: Asynchronous — happens within seconds, invisible to student
+
+    RD->>CW: Dequeue task
+    CW->>DB: INSERT INTO progress_answers (event_id, …)<br/>ON CONFLICT (event_id) DO NOTHING
+    DB-->>CW: OK (idempotent — safe to retry)
+    CW->>RD: ACK (task complete)
+```
+
 ### Bulk Writes
 
 Events from the same student's offline queue flush arrive together. The Celery task receives a list and bulk-inserts with `executemany`, then deduplicates with `ON CONFLICT (event_id) DO NOTHING`.
@@ -640,17 +846,60 @@ services:
 | Email | AWS SES or SendGrid | Per-use |
 
 ```mermaid
-graph LR
-    ALB["AWS ALB"] --> API1["EC2: API\n4 uvicorn workers"]
-    ALB --> API2["EC2: API\n4 uvicorn workers"]
-    API1 & API2 --> PGB["PgBouncer\n(on each API host)"]
-    PGB --> RDSM[("RDS Primary")]
-    RDSM --> RDSR[("RDS Replica")]
-    API1 & API2 --> EC["ElastiCache Redis"]
-    API1 & API2 --> S3["S3 + CloudFront"]
-    WORKER["EC2: Celery Worker"] --> EC
-    WORKER --> RDSM
-    WORKER --> S3
+graph TB
+    subgraph INTERNET_D["Internet"]
+        MOB_D["Mobile App\nTeacher Dashboard\nAdmin Dashboard"]
+    end
+
+    subgraph AWS_D["AWS Cloud (us-east-1)"]
+        subgraph EDGE_D["Edge"]
+            CF_D["CloudFront Distribution\nOrigin: S3 bucket\nCache: audio 24hr · JSON 1hr\nGlobal PoPs"]
+            ACM_D["ACM Certificate\n*.studybuddy.app"]
+        end
+
+        subgraph COMPUTE_D["Compute  (Multi-AZ)"]
+            ALB_D["Application Load Balancer\nHealth check: GET /health\nSSL via ACM · access logs → S3"]
+
+            subgraph ASG_D["Auto-Scaling Group  (2–8 × EC2 t3.large)"]
+                EC2A_D["EC2 t3.large — AZ-a\nnginx + gunicorn (4 workers)\nPgBouncer sidecar\nSentry · CloudWatch agent"]
+                EC2B_D["EC2 t3.large — AZ-b\nnginx + gunicorn (4 workers)\nPgBouncer sidecar\nSentry · CloudWatch agent"]
+            end
+
+            EC2W_D["EC2 t3.medium (Worker host)\nCelery pipeline workers ×2\nCelery IO workers ×2\nCelery Beat ×1"]
+        end
+
+        subgraph DATA_D["Data  (Multi-AZ)"]
+            RDSP_D[("RDS PostgreSQL db.r6g.large\nPrimary — AZ-a\nMulti-AZ standby")]
+            RDSR_D[("RDS PostgreSQL db.r6g.large\nRead Replica — AZ-b\nAnalytics + app reads")]
+            ECC_D["ElastiCache Redis\ncache.r6g.large  3-node cluster\nAOF persistence enabled"]
+        end
+
+        subgraph STORAGE_D["Storage"]
+            S3B_D["S3 Bucket: sb-content-prod\nVersioning enabled\nServer-side encryption (AES-256)\nLifecycle: archive after 1yr"]
+        end
+
+        subgraph OPS_D["Observability"]
+            CWL_D["CloudWatch\nLogs · Metrics · Alarms\nDashboard: latency · error rate"]
+            SENT_D["Sentry\nBackend + Mobile error tracking"]
+        end
+    end
+
+    MOB_D -->|"Audio + static JSON\n(HTTPS)"| CF_D
+    MOB_D -->|"API requests (HTTPS)"| ALB_D
+    CF_D --> S3B_D
+    ALB_D --> EC2A_D & EC2B_D
+    EC2A_D & EC2B_D -->|"aioredis"| ECC_D
+    EC2A_D & EC2B_D -->|"asyncpg → PgBouncer"| RDSP_D
+    EC2A_D & EC2B_D -->|"asyncpg (direct)"| RDSR_D
+    EC2A_D & EC2B_D -->|"presigned URLs"| S3B_D
+    EC2W_D --> ECC_D & RDSP_D & S3B_D
+    RDSP_D -->|"streaming replication"| RDSR_D
+    EC2A_D & EC2B_D & EC2W_D --> CWL_D & SENT_D
+
+    style ALB_D fill:#1e3a5f,color:#e2e8f0
+    style ECC_D fill:#1a3a1a,color:#e2e8f0
+    style RDSP_D fill:#1a2a4a,color:#e2e8f0
+    style RDSR_D fill:#1a2a4a,color:#e2e8f0
 ```
 
 ### Production — Scaled (Phase 7+, >50k students)

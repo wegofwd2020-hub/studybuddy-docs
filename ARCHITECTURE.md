@@ -16,6 +16,43 @@ The Free edition (studybuddy_free) validated the product concept but exposed two
 
 The OnDemand architecture eliminates both by moving all AI interaction to a backend pipeline and delivering pre-generated content to the app.
 
+### System Context (C4 Level 1)
+
+Who interacts with the system and which external services it depends on.
+
+```mermaid
+graph TB
+    subgraph USERS["Actors"]
+        STU["🎓 Student\nGrades 5–12\nUses mobile app to\nbrowse lessons and take quizzes"]
+        TCH["👩‍🏫 Teacher / School Admin\nUploads curriculum,\nmanages roster,\nviews class analytics"]
+        OPR["🔧 Platform Operator\nManages content pipeline,\nmonitors platform,\nreviews analytics"]
+    end
+
+    subgraph SYSTEM["StudyBuddy OnDemand [Software System]"]
+        SB["AI-powered STEM tutoring platform\nPre-generated content delivery\nSubscription-based access\nMulti-language · Offline-capable"]
+    end
+
+    subgraph EXTERNAL["External Systems"]
+        ANT["Anthropic API\nAI content generation\n(lesson · quiz · tutorial · experiment)"]
+        STR["Stripe\nPayment processing\nSubscription lifecycle"]
+        TTS_E["Amazon Polly / Google TTS\nAudio synthesis\n(pre-generated MP3s)"]
+        EML["AWS SES / SendGrid\nTransactional email\n(registration · reset · notifications)"]
+    end
+
+    STU -->|"Browses curriculum,\ntakes quizzes, tracks progress\n[HTTPS · Mobile App]"| SB
+    TCH -->|"Uploads XLSX curriculum,\nmanages student roster,\nviews analytics [HTTPS · Browser]"| SB
+    OPR -->|"Triggers content pipeline,\nmonitors platform [HTTPS · Browser]"| SB
+    SB -->|"Generates lesson, quiz,\ntutorial, experiment content\n[HTTPS · REST API]"| ANT
+    SB -->|"Processes subscription\npayments, receives webhooks\n[HTTPS · REST API]"| STR
+    SB -->|"Synthesises lesson\naudio MP3s at pipeline time\n[HTTPS · SDK]"| TTS_E
+    SB -->|"Sends registration,\npassword reset, pipeline\ncompletion emails [SMTP / API]"| EML
+
+    style SB fill:#1e3a5f,color:#e2e8f0
+    style STU fill:#1a4a3a,color:#e2e8f0
+    style TCH fill:#1a4a3a,color:#e2e8f0
+    style OPR fill:#1a4a3a,color:#e2e8f0
+```
+
 ---
 
 ## System Overview
@@ -83,6 +120,115 @@ graph TD
     SUB -->|webhooks| PAY
     ADMIN --> DB
     ADMIN --> CS
+```
+
+### Container Diagram (C4 Level 2)
+
+The major deployable units and how they communicate.
+
+```mermaid
+graph TB
+    subgraph DEVICE_C["Mobile Device"]
+        KAPP["Kivy Mobile App\n[Python / Kivy]\nStudent UI, local SQLite cache,\noffline progress event queue,\nJWT token store"]
+    end
+
+    subgraph BROWSER_C["Web Browser"]
+        TDASH["Teacher Dashboard\n[Web Application]\nCurriculum upload (XLSX / form),\nstudent roster, class analytics"]
+        ADASH["Admin Dashboard\n[Web Application]\nPlatform analytics, content\nmanagement, pipeline control"]
+    end
+
+    subgraph BACKEND_C["Backend Platform [Python / FastAPI]"]
+        BAPI["Backend REST API\n[FastAPI + uvicorn]\nJWT auth, entitlement checks,\ncontent serving, progress recording,\nsubscription management"]
+        CPIPE["Content Pipeline\n[Python CLI + Celery Workers]\nCalls Claude + TTS per unit × language,\nwrites pre-generated content to store"]
+    end
+
+    subgraph DATA_C["Data Stores"]
+        PG_C[("PostgreSQL\n[Relational DB]\nStudents · Teachers · Schools\nProgress · Subscriptions\nCurricula · Feedback")]
+        RD_C[("Redis\n[Cache + Broker]\nEntitlement · JWT tokens\nCurriculum resolver cache\nCelery task broker")]
+        S3_C[("S3 + CDN\n[Object Store + CDN]\nPre-generated content\ncurricula/{id}/{unit}/\nlesson.json · quiz.json · audio.mp3")]
+    end
+
+    subgraph EXT_C["External Services"]
+        ANT_C["Anthropic API"]
+        STR_C["Stripe"]
+        TTS_C["Polly / Google TTS"]
+        SES_C["SES / SendGrid"]
+    end
+
+    KAPP -->|"REST + JWT\n[HTTPS]"| BAPI
+    TDASH & ADASH -->|"REST + JWT\n[HTTPS]"| BAPI
+    KAPP -->|"Pre-signed URLs\n(audio + JSON) [HTTPS]"| S3_C
+    BAPI -->|"asyncpg pool"| PG_C
+    BAPI -->|"aioredis pool"| RD_C
+    BAPI -->|"S3 SDK / presigned URLs"| S3_C
+    BAPI -->|"Celery task dispatch"| RD_C
+    CPIPE -->|"Read units"| PG_C
+    CPIPE -->|"Write content"| S3_C
+    CPIPE -->|"Generate content"| ANT_C
+    CPIPE -->|"Synthesise audio"| TTS_C
+    CPIPE -->|"Send notifications"| SES_C
+    CPIPE -->|"Subscription events"| STR_C
+
+    style BAPI fill:#1e3a5f,color:#e2e8f0
+    style CPIPE fill:#1e3a5f,color:#e2e8f0
+```
+
+### Backend Component Diagram (C4 Level 3)
+
+Internal structure of the FastAPI backend: services, middleware, and shared core.
+
+```mermaid
+graph TB
+    GW_C["nginx\nTLS · Rate limiting · Load balance · gzip"]
+
+    subgraph FASTAPI_C["FastAPI Application (one uvicorn worker shown)"]
+        subgraph MW["Middleware / Dependencies"]
+            JWTMW["JWT Auth\nVerify signature\nExtract student_id · role · locale"]
+            RLMW["Rate Limit\nRedis counters\nper-IP + per-student"]
+            CURMW["Curriculum Resolver\nResolve curriculum_id\nfrom school + grade + year"]
+            ENTMW["Entitlement Checker\nFree tier gating\nL1→L2→DB lookup"]
+        end
+
+        subgraph SVC["Service Layer (FastAPI Routers)"]
+            ASVC["Auth\n/auth/*\nregister · login · refresh\nforgot-password · reset\naccount deletion"]
+            CSVC["Curriculum\n/curriculum/*\ngrade tree · unit list\nXLSX upload · activate"]
+            CTSVC["Content\n/content/*\nlesson · quiz · tutorial\nexperiment · audio URL"]
+            PSVC["Progress\n/progress/*\nsession open/close\nanswer recording · history"]
+            SSVC["Subscription\n/subscription/*\nStripe checkout · webhook\nplan status · cancel"]
+            SCHSVC["School\n/schools/*\nregistration · teachers\nenrolment roster"]
+            ANSVC["Analytics\n/analytics/*\nlesson view events\nclass metrics · student metrics"]
+            FBSVC["Feedback\n/feedback\nsubmit · admin list\nmark reviewed"]
+            ADMSVC["Admin\n/admin/*\npipeline status · regenerate\nreports · audit log"]
+        end
+
+        subgraph CORE_C["Core / Shared Modules"]
+            CACHEMGR["Cache Manager\nL1 TTLCache + L2 Redis\nread/write/invalidate helpers"]
+            CELDISP["Celery Dispatcher\nFire-and-forget task dispatch\npipeline · email · flush"]
+            CIRC["Circuit Breakers\nStripe · Anthropic\nTTS · Email"]
+            L1C["L1 In-Process Cache\ncachetools TTLCache\nJWT keys · curriculum trees\napp config"]
+        end
+    end
+
+    subgraph STORES_C["Stores"]
+        PGS[("PostgreSQL\n(via PgBouncer)")]
+        RDS[("Redis")]
+        S3S[("S3 / CDN")]
+    end
+
+    GW_C --> MW
+    MW --> SVC
+    SVC --> CORE_C
+    CACHEMGR --> RDS
+    CACHEMGR --> L1C
+    SVC --> PGS
+    CTSVC --> S3S
+    CELDISP --> RDS
+    CIRC --> PGS
+
+    style JWTMW fill:#2a1a4a,color:#e2e8f0
+    style RLMW fill:#2a1a4a,color:#e2e8f0
+    style CURMW fill:#2a1a4a,color:#e2e8f0
+    style ENTMW fill:#2a1a4a,color:#e2e8f0
 ```
 
 ---
@@ -663,6 +809,146 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
 }
 ```
 
+### Entity Relationship Diagram
+
+Key relationships between the core data entities.
+
+```mermaid
+erDiagram
+    STUDENT {
+        uuid student_id PK
+        string name
+        string email
+        string password_hash
+        int grade
+        string locale
+        uuid school_id FK
+        timestamp enrolled_at
+        int lessons_accessed
+        timestamp created_at
+    }
+    SCHOOL {
+        uuid school_id PK
+        string name
+        string contact_email
+        string country
+        string enrolment_code
+        string status
+        timestamp created_at
+    }
+    TEACHER {
+        uuid teacher_id PK
+        uuid school_id FK
+        string name
+        string email
+        string role
+        timestamp created_at
+    }
+    CURRICULUM {
+        uuid curriculum_id PK
+        uuid school_id FK
+        int grade
+        int year
+        string name
+        string source_type
+        string status
+        bool restrict_access
+        uuid created_by FK
+        timestamp activated_at
+    }
+    CURRICULUM_UNIT {
+        string unit_id PK
+        uuid curriculum_id FK
+        string subject
+        string unit_name
+        bool has_lab
+        string content_status
+        int sequence
+    }
+    SCHOOL_ENROLMENT {
+        uuid enrolment_id PK
+        uuid school_id FK
+        string student_email
+        uuid student_id FK
+        string status
+        timestamp added_at
+    }
+    SUBSCRIPTION {
+        uuid subscription_id PK
+        uuid student_id FK
+        string plan
+        string status
+        string stripe_customer_id
+        string stripe_subscription_id
+        timestamp current_period_end
+    }
+    SESSION {
+        uuid session_id PK
+        uuid student_id FK
+        string unit_id FK
+        uuid curriculum_id FK
+        int score
+        int total_questions
+        int attempt_number
+        bool passed
+        bool completed
+        timestamp started_at
+        timestamp ended_at
+    }
+    PROGRESS_ANSWER {
+        uuid answer_id PK
+        uuid session_id FK
+        string event_id
+        string question_id
+        int student_answer
+        int correct_answer
+        bool correct
+        int ms_taken
+    }
+    LESSON_VIEW {
+        uuid view_id PK
+        uuid student_id FK
+        string unit_id
+        uuid curriculum_id FK
+        int duration_s
+        bool audio_played
+        bool experiment_viewed
+        timestamp started_at
+        timestamp ended_at
+    }
+    FEEDBACK {
+        uuid feedback_id PK
+        uuid student_id FK
+        string category
+        string unit_id
+        uuid curriculum_id FK
+        string message
+        int rating
+        bool reviewed
+        timestamp submitted_at
+    }
+    STRIPE_EVENT {
+        string stripe_event_id PK
+        string event_type
+        string outcome
+        timestamp processed_at
+    }
+
+    STUDENT }o--o| SCHOOL : "enrolled in"
+    SCHOOL ||--o{ TEACHER : "employs"
+    SCHOOL ||--o{ CURRICULUM : "owns"
+    SCHOOL ||--o{ SCHOOL_ENROLMENT : "roster"
+    CURRICULUM ||--o{ CURRICULUM_UNIT : "contains"
+    STUDENT ||--o{ SCHOOL_ENROLMENT : "linked via"
+    STUDENT ||--o| SUBSCRIPTION : "has"
+    STUDENT ||--o{ SESSION : "takes"
+    SESSION ||--o{ PROGRESS_ANSWER : "records"
+    STUDENT ||--o{ LESSON_VIEW : "views"
+    STUDENT ||--o{ FEEDBACK : "submits"
+    CURRICULUM_UNIT ||--o{ SESSION : "assessed by"
+    CURRICULUM_UNIT ||--o{ LESSON_VIEW : "viewed via"
+```
+
 ### Content (stored in Content Store, keyed by unit_id)
 ```
 {unit_id}/
@@ -911,6 +1197,37 @@ student JWT → school_id (nullable)
     if found → use school curriculum_id
   if no school_id or no active curriculum:
     use default curriculum_id for (grade, current_year)
+```
+
+```mermaid
+flowchart TD
+    REQ["Content Request\nGET /content/{unit_id}/lesson"]
+    JWT["Extract from JWT\nstudent_id · grade · locale"]
+    SCHOOL{"Student has\nschool_id?"}
+    ACURR{"Active curriculum\nfor (school_id, grade, year)?"}
+    RESTRICT{"restrict_access\n= true?"}
+    ENROLLED{"Student enrolled\nin school?"}
+    USE_SCHOOL["Use school curriculum_id\nContent path:\ncurricula/{school_curriculum_id}/{unit_id}/"]
+    DEFAULT["Use default curriculum_id\ndefault-{year}-g{grade}\nContent path:\ncurricula/default-{year}-g{grade}/{unit_id}/"]
+    FORBIDDEN["HTTP 403\nNot enrolled in\nthis school's curriculum"]
+    SERVE["Serve content\nin student locale\n(fallback to en)"]
+
+    REQ --> JWT --> SCHOOL
+    SCHOOL -->|"Yes"| ACURR
+    SCHOOL -->|"No"| DEFAULT
+    ACURR -->|"Yes"| RESTRICT
+    ACURR -->|"No"| DEFAULT
+    RESTRICT -->|"Yes"| ENROLLED
+    RESTRICT -->|"No"| USE_SCHOOL
+    ENROLLED -->|"Yes"| USE_SCHOOL
+    ENROLLED -->|"No"| FORBIDDEN
+    USE_SCHOOL --> SERVE
+    DEFAULT --> SERVE
+
+    style USE_SCHOOL fill:#1a4a3a,color:#e2e8f0
+    style DEFAULT fill:#1e3a5f,color:#e2e8f0
+    style FORBIDDEN fill:#4a1a1a,color:#e2e8f0
+    style SERVE fill:#1a3a1a,color:#e2e8f0
 ```
 
 ### Content Store Paths
