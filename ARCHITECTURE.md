@@ -622,6 +622,26 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
 
 ---
 
+### Reports
+
+All report endpoints require a teacher or school_admin JWT. Students cannot access these endpoints.
+
+| Method | Endpoint | Returns |
+|---|---|---|
+| GET | `/reports/school/{school_id}/overview?period=7d\|30d\|term` | Class overview summary |
+| GET | `/reports/school/{school_id}/unit/{unit_id}?period=7d\|30d\|term` | Unit performance deep-dive |
+| GET | `/reports/school/{school_id}/student/{student_id}` | Individual student report card |
+| GET | `/reports/school/{school_id}/curriculum-health` | All units ranked by health tier |
+| GET | `/reports/school/{school_id}/feedback?unit_id=&category=&reviewed=` | Feedback by unit |
+| GET | `/reports/school/{school_id}/trends?period=4w\|12w\|term` | Week-over-week trend data |
+| POST | `/reports/school/{school_id}/export` | `{report_type, filters}` → `{download_url}` CSV |
+| GET | `/reports/school/{school_id}/alerts` | Active threshold alerts |
+| PUT | `/reports/school/{school_id}/alerts/settings` | Configure alert thresholds |
+| POST | `/reports/school/{school_id}/digest/subscribe` | Subscribe / update weekly digest settings |
+| POST | `/reports/school/{school_id}/refresh` | Trigger on-demand materialized view refresh (school_admin only) |
+
+---
+
 ## Data Models
 
 ### Student
@@ -806,6 +826,32 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
   "rating": "1-5 | null",
   "submitted_at": "ISO8601",
   "reviewed": false
+}
+```
+
+### Report Alert Settings
+```json
+{
+  "school_id": "uuid",
+  "unit_pass_rate_threshold_pct": 50,
+  "feedback_volume_threshold_7d": 3,
+  "student_inactive_days": 14,
+  "score_drop_threshold_pct": 10,
+  "notify_on_new_feedback": true,
+  "updated_at": "ISO8601"
+}
+```
+
+### Digest Subscription
+```json
+{
+  "subscription_id": "uuid",
+  "teacher_id": "uuid",
+  "school_id": "uuid",
+  "email": "string",
+  "timezone": "America/Toronto",
+  "enabled": true,
+  "last_sent_at": "ISO8601 | null"
 }
 ```
 
@@ -1430,6 +1476,266 @@ Already tracked via `POST /progress/session` / `POST /progress/session/end`. The
 
 ---
 
+## Teacher & School Reporting
+
+### Overview
+
+Teachers and school admins have access to six report types covering lesson engagement, quiz performance, individual student progress, curriculum quality, content feedback, and usage trends. All reports draw from data already collected by the Progress Service (Phase 3) and Analytics Service (Phase 10).
+
+Reports are available through:
+- **Teacher Dashboard** — always-on web views with filtering and drill-down
+- **Weekly Email Digest** — opt-in summary of the past 7 days; configurable
+- **CSV Export** — any report table can be exported to a spreadsheet
+- **Threshold Alerts** — email + in-dashboard notifications when key metrics cross configured thresholds
+
+```mermaid
+graph TD
+    subgraph DATA_SOURCES["Data Sources (collected in Phases 3 + 10)"]
+        LV["lesson_views\nstart · end · duration\naudio_played · experiment_viewed"]
+        SES["sessions\nattempt_number · score\npassed · duration_s"]
+        PA["progress_answers\ncorrect/incorrect · ms_taken"]
+        FB["feedback\ncategory · rating · message"]
+    end
+
+    subgraph AGGREGATION["Aggregation Layer (Celery Beat + Materialized Views)"]
+        MV1["mv_unit_struggle\npass rate · avg attempts · avg score\nRefreshed nightly"]
+        MV2["mv_class_summary\nper (school_id, curriculum_id, unit_id)\nlesson views · quiz attempts · engagement\nRefreshed nightly"]
+        MV3["mv_student_progress\nper (student_id, curriculum_id)\ncompletion · scores · time\nRefreshed nightly"]
+    end
+
+    subgraph REPORTS["Report Endpoints (Teacher Dashboard)"]
+        R1["Class Overview\nGET /reports/school/{id}/overview"]
+        R2["Unit Performance\nGET /reports/school/{id}/unit/{unit_id}"]
+        R3["Student Progress\nGET /reports/school/{id}/student/{student_id}"]
+        R4["Curriculum Health\nGET /reports/school/{id}/curriculum-health"]
+        R5["Feedback Report\nGET /reports/school/{id}/feedback"]
+        R6["Trend Report\nGET /reports/school/{id}/trends?period=4w"]
+    end
+
+    subgraph DELIVERY["Delivery"]
+        DASH["Teacher Dashboard\nFilters · Drill-down\nSort · Paginate"]
+        EMAIL["Weekly Digest\nOpt-in · Configurable\nSent Monday 08:00 local"]
+        CSV["CSV Export\nPOST /reports/school/{id}/export"]
+        ALERT["Threshold Alerts\nEmail + Dashboard badge"]
+    end
+
+    DATA_SOURCES --> AGGREGATION
+    AGGREGATION --> REPORTS
+    REPORTS --> DELIVERY
+```
+
+---
+
+### Report 1 — Class Overview
+
+**Endpoint:** `GET /reports/school/{school_id}/overview?period=7d|30d|term`
+
+A single-screen summary of the class's activity and health for the selected period. This is the default landing page of the Teacher Dashboard.
+
+| Field | Description |
+|---|---|
+| `enrolled_students` | Total students on the school roster |
+| `active_students_period` | Students who viewed at least one lesson in the period |
+| `active_pct` | `active_students / enrolled × 100` |
+| `lessons_viewed` | Total lesson view events in the period |
+| `quiz_attempts` | Total quiz sessions in the period |
+| `class_avg_score_pct` | Mean score across all quiz sessions in the period |
+| `first_attempt_pass_rate_pct` | % of first-attempt quiz sessions with `passed = true` |
+| `audio_play_rate_pct` | % of lesson views where `audio_played = true` |
+| `units_with_struggles` | Unit IDs where `first_attempt_pass_rate < 50%` OR `avg_attempts_to_pass > 2` |
+| `units_no_activity` | Unit IDs in the curriculum with zero lesson views |
+| `unreviewed_feedback_count` | Open feedback items for this school's curriculum |
+
+---
+
+### Report 2 — Unit Performance
+
+**Endpoint:** `GET /reports/school/{school_id}/unit/{unit_id}?period=7d|30d|term`
+
+A deep-dive into one unit. Answers: are students engaging with this lesson? Are they passing the quiz? Is the content too hard or too easy?
+
+| Field | Description |
+|---|---|
+| `students_viewed_lesson` | Unique students who opened the lesson |
+| `lesson_view_pct` | `students_viewed / enrolled × 100` |
+| `avg_lesson_duration_s` | Mean time students spent on the lesson screen |
+| `audio_play_rate_pct` | % of lesson views with audio played |
+| `experiment_view_pct` | % of lesson views where experiment was opened (null if no lab) |
+| `total_quiz_attempts` | Total quiz sessions for this unit |
+| `unique_students_attempted` | Distinct students who attempted the quiz |
+| `first_attempt_pass_rate_pct` | % of first attempts that passed |
+| `avg_score_pct` | Mean score across all attempts |
+| `avg_attempts_to_pass` | Mean attempt count for students who passed |
+| `score_distribution` | `{1-2: N, 3-4: N, 5-6: N, 7-8: N}` (buckets out of 8) |
+| `attempt_distribution` | `{1: N, 2: N, 3: N, "4+": N}` students per attempt count |
+| `struggle_flag` | `true` if pass rate < 50% OR avg_attempts > 2 |
+| `feedback_count` | Feedback submissions for this unit |
+| `avg_rating` | Mean rating (1–5) from feedback |
+| `feedback_summary` | Top 3 most recent feedback messages |
+
+---
+
+### Report 3 — Student Progress
+
+**Endpoint:** `GET /reports/school/{school_id}/student/{student_id}`
+
+A per-student report card. Useful when a teacher wants to check on a struggling student or prepare a parent-teacher meeting.
+
+| Field | Description |
+|---|---|
+| `student_name` | Student's name |
+| `grade` | Enrolled grade |
+| `last_active` | Timestamp of most recent lesson view or quiz attempt |
+| `units_completed` | Count of units where `passed = true` (at least once) |
+| `units_in_progress` | Count of units: lesson viewed but quiz not yet passed |
+| `units_not_started` | Count of units with no lesson view |
+| `completion_pct` | `units_completed / total_units × 100` |
+| `overall_avg_score_pct` | Mean score across all passed quiz sessions |
+| `total_time_spent_s` | Sum of lesson view durations + quiz session durations |
+| `per_unit` | Array: `{unit_id, unit_name, subject, lesson_viewed, quiz_attempts, best_score, passed, avg_duration_s}` |
+| `strongest_subject` | Subject with highest avg score |
+| `needs_attention_subject` | Subject with lowest avg score or most attempts |
+
+---
+
+### Report 4 — Curriculum Health
+
+**Endpoint:** `GET /reports/school/{school_id}/curriculum-health`
+
+An overview of all units ranked by how well students are doing. Helps the teacher identify which units may need enrichment, extra class time, or a content quality report to the platform.
+
+```mermaid
+graph LR
+    subgraph GOOD["✅ Healthy  (pass rate ≥ 70%, avg attempts ≤ 1.5)"]
+        G1["G8-MATH-001\nAlgebra: Linear Equations\nPass rate 84% · avg 1.2 attempts"]
+        G2["G8-ENG-001\nEssay Writing\nPass rate 78% · avg 1.3 attempts"]
+    end
+    subgraph WATCH["⚠️ Watch  (pass rate 50–70%)"]
+        W1["G8-SCI-002\nChemical Reactions\nPass rate 61% · avg 1.9 attempts"]
+    end
+    subgraph STRUGGLE["🔴 Struggling  (pass rate < 50% OR avg attempts > 2)"]
+        S1["G8-MATH-007\nQuadratic Equations\nPass rate 38% · avg 2.8 attempts"]
+        S2["G8-SCI-003\nGenetics\nPass rate 44% · avg 2.4 attempts"]
+    end
+    subgraph INACTIVE["⚫ No Activity"]
+        I1["G8-TECH-003\nNo students viewed this lesson"]
+    end
+```
+
+| Health tier | Criteria |
+|---|---|
+| Healthy | First-attempt pass rate ≥ 70% AND avg attempts to pass ≤ 1.5 |
+| Watch | First-attempt pass rate 50–70% OR avg attempts 1.5–2.0 |
+| Struggling | First-attempt pass rate < 50% OR avg attempts > 2.0 |
+| No Activity | Zero lesson views from enrolled students |
+
+Each unit entry also shows: `feedback_count`, `avg_rating`, and a `recommended_action` field with one of: `none | review_content | add_class_time | report_to_admin`.
+
+---
+
+### Report 5 — Feedback Report
+
+**Endpoint:** `GET /reports/school/{school_id}/feedback?unit_id=&category=&reviewed=&sort=recent|volume`
+
+All student feedback for the school's curriculum, grouped by unit. Gives the teacher visibility into what students are saying about the content.
+
+| Field | Description |
+|---|---|
+| `total_feedback_count` | Total feedback items for this curriculum |
+| `unreviewed_count` | Items not yet marked reviewed |
+| `avg_rating_overall` | Mean rating across all rated feedback |
+| `by_unit` | Array of unit summaries (see below) |
+
+Per unit:
+| Field | Description |
+|---|---|
+| `unit_id`, `unit_name` | Identifies the unit |
+| `feedback_count` | Total feedback for this unit |
+| `avg_rating` | Mean rating (null if no ratings) |
+| `category_breakdown` | `{content: N, ux: N, general: N}` |
+| `trending` | `true` if > 3 feedback items in the last 7 days |
+| `feedback_items` | Paginated list: `{feedback_id, category, rating, message, submitted_at, reviewed}` |
+
+Teachers can mark individual feedback items as reviewed directly from this report. Reviewed items are hidden by default (toggle to show).
+
+---
+
+### Report 6 — Trend Report
+
+**Endpoint:** `GET /reports/school/{school_id}/trends?period=4w|12w|term`
+
+Week-over-week engagement and performance trends. Helps the teacher see if the class is improving over time or if attention has dropped.
+
+| Metric | Chart type | Description |
+|---|---|---|
+| Active students | Line chart | Unique students per week |
+| Lessons viewed | Bar chart | Total lesson views per week |
+| Quiz attempts | Bar chart | Total quiz sessions per week |
+| Class avg score | Line chart | Mean score per week across all units |
+| Pass rate | Line chart | First-attempt pass rate per week |
+| Audio play rate | Line chart | % of lesson views with audio per week |
+| Feedback volume | Bar chart | Feedback submissions per week |
+
+---
+
+### Alert System
+
+Teachers can configure threshold alerts that trigger an email notification and a badge in the Teacher Dashboard.
+
+| Alert | Default threshold | Configurable |
+|---|---|---|
+| Unit pass rate drops below threshold | 50% | Yes |
+| Unit receives N+ feedback items in 7 days | 3 | Yes |
+| Student has not logged in for N days | 14 | Yes |
+| Class average score drops > 10% week-over-week | 10% | Yes |
+| New unreviewed feedback waiting | Immediate | On/Off |
+
+Alert settings stored per school in `report_alert_settings`. Alerts evaluated by Celery Beat daily at 06:00 UTC.
+
+---
+
+### Weekly Email Digest
+
+Opt-in. Sent Monday 08:00 in the teacher's local timezone. Covers the past 7 days.
+
+Contents:
+1. Active students this week vs last week
+2. Top 3 most-engaged units (highest lesson view count)
+3. Units flagged as struggling (if any new ones appeared this week)
+4. New feedback items count + link to Feedback Report
+5. Any students not active for 14+ days (engagement alert)
+6. Link to full Teacher Dashboard
+
+**Endpoint:** `POST /reports/school/{school_id}/digest/subscribe` — `{email, timezone, enabled}`
+
+---
+
+### Aggregation Strategy
+
+Report data is served from materialized views, not from raw event tables. This keeps report queries fast and does not touch the write path.
+
+```
+mv_class_summary        — per (school_id, curriculum_id, unit_id)
+                          lesson views · quiz attempts · pass rates · avg scores
+                          Refreshed: nightly 02:00 UTC by Celery Beat
+
+mv_student_progress     — per (student_id, curriculum_id)
+                          completed units · scores · time · attempt counts
+                          Refreshed: nightly 02:00 UTC
+
+mv_unit_struggle        — per (unit_id, curriculum_id)
+                          pass rate · avg attempts · avg score
+                          Refreshed: nightly 02:00 UTC (already defined)
+
+mv_feedback_summary     — per (curriculum_id, unit_id)
+                          feedback count · avg rating · category breakdown
+                          Refreshed: hourly (feedback is time-sensitive)
+```
+
+For the Teacher Dashboard, data may be up to 24 hours stale (nightly refresh). A "Last updated" timestamp is shown on every report. On-demand refresh available for school_admin role (triggers immediate Celery task).
+
+---
+
 ## Technology Stack
 
 | Layer | Technology | Rationale |
@@ -1610,6 +1916,26 @@ Already tracked via `POST /progress/session` / `POST /progress/session/end`. The
 - Admin Dashboard: feedback review panel + analytics visualisations
 
 **Milestone:** A teacher can see which units their class is struggling with and how long students are spending. Students can report content issues. Admin can review and act on feedback.
+
+---
+
+### Phase 11 — Teacher & School Reporting Dashboard
+**Goal:** Teachers can see lesson engagement, quiz performance, student progress, curriculum quality, and student feedback — all in one dashboard, with weekly email digests and threshold alerts.
+
+- PostgreSQL schema: `report_alert_settings`, `digest_subscriptions` (Alembic migration)
+- Materialized views: `mv_class_summary`, `mv_student_progress`, `mv_feedback_summary` (add to Celery Beat nightly refresh)
+- All 6 report endpoints: overview · unit · student · curriculum-health · feedback · trends
+- `POST /reports/school/{id}/export` — CSV generation (async Celery task, returns download URL)
+- `PUT /reports/school/{id}/alerts/settings` — save threshold configuration
+- Alert evaluation Celery Beat task: runs daily 06:00 UTC, sends email on threshold breach
+- `POST /reports/school/{id}/digest/subscribe` — subscribe teacher to weekly digest
+- Weekly digest Celery Beat task: runs Monday 08:00 per timezone; renders and sends email
+- `POST /reports/school/{id}/refresh` — on-demand materialized view refresh for school_admin
+- Teacher Dashboard: Report landing page, unit drill-down, student report card, curriculum health view with tier badges, feedback review panel
+- All report endpoints route to PostgreSQL read replica; never touch primary
+- "Last updated" timestamp shown on all report pages (materialized view refresh time)
+
+**Milestone:** A teacher can open the dashboard on Monday morning and immediately see which units the class struggled with last week, which students haven't logged in, and what feedback has been submitted — without writing a single query.
 
 ---
 

@@ -267,6 +267,30 @@
 
 ---
 
+### FR-REPORTS: Teacher & School Reporting
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| FR-RPT-001 | Class Overview report: `GET /reports/school/{id}/overview` returns active students, lesson views, quiz attempts, avg score, pass rate, audio play rate, struggling units, unreviewed feedback count for a configurable period (7d/30d/term) | P0 | 11 | proposed |
+| FR-RPT-002 | Unit Performance report: `GET /reports/school/{id}/unit/{unit_id}` returns engagement metrics, score distribution, attempt distribution, struggle flag, and feedback summary | P0 | 11 | proposed |
+| FR-RPT-003 | Student Progress report: `GET /reports/school/{id}/student/{student_id}` returns per-student completion, scores, time, attempts, strongest and weakest subjects | P1 | 11 | proposed |
+| FR-RPT-004 | Curriculum Health report: `GET /reports/school/{id}/curriculum-health` returns all units ranked into Healthy / Watch / Struggling / No Activity tiers with recommended action | P0 | 11 | proposed |
+| FR-RPT-005 | Feedback report: `GET /reports/school/{id}/feedback` returns all student feedback grouped by unit, with category breakdown, avg rating, trending flag, and paginated message list | P0 | 11 | proposed |
+| FR-RPT-006 | Trend report: `GET /reports/school/{id}/trends` returns week-over-week data for active students, lessons viewed, quiz attempts, avg score, pass rate, audio play rate, feedback volume | P1 | 11 | proposed |
+| FR-RPT-007 | CSV export: `POST /reports/school/{id}/export` accepts `{report_type, filters}`, generates CSV asynchronously (Celery), returns a time-limited download URL | P1 | 11 | proposed |
+| FR-RPT-008 | Teachers can mark individual feedback items as reviewed directly from the Feedback report | P1 | 11 | proposed |
+| FR-RPT-009 | Threshold alerts: configurable per school — unit pass rate, feedback volume, student inactivity, score drop; evaluated daily by Celery Beat; delivered by email + dashboard badge | P1 | 11 | proposed |
+| FR-RPT-010 | Weekly email digest: opt-in per teacher; sent Monday 08:00 local time; covers active students, struggling units, new feedback, inactive students; configurable via `POST /reports/school/{id}/digest/subscribe` | P1 | 11 | proposed |
+| FR-RPT-011 | All report data served from PostgreSQL read replica via materialized views; never touches primary for report queries | P0 | 11 | proposed |
+| FR-RPT-012 | Materialized views refreshed nightly at 02:00 UTC by Celery Beat (`mv_class_summary`, `mv_student_progress`, `mv_feedback_summary`); `mv_feedback_summary` refreshed hourly | P0 | 11 | proposed |
+| FR-RPT-013 | On-demand report refresh: `POST /reports/school/{id}/refresh` available to school_admin role; triggers immediate Celery task to refresh materialized views | P2 | 11 | proposed |
+| FR-RPT-014 | "Last updated" timestamp shown on all report pages indicating materialized view refresh time | P1 | 11 | proposed |
+| FR-RPT-015 | Report endpoints accessible only to teacher/school_admin JWT; students cannot access any /reports/* endpoint | P0 | 11 | proposed |
+| FR-RPT-016 | Teacher can filter Unit Performance and Feedback reports by subject, date range, and feedback category | P1 | 11 | proposed |
+| FR-RPT-017 | Curriculum Health recommended_action field: `none | review_content | add_class_time | report_to_admin` based on health tier and feedback count | P2 | 11 | proposed |
+
+---
+
 ## Non-Functional Requirements
 
 ### NFR-SEC: Security
@@ -394,6 +418,9 @@
 | ADR-016 | Progress writes are fire-and-forget via Celery | Student response time must not be gated on DB write latency; writes can tolerate seconds of delay with dedup guarantees | 2026-03-23 | accepted |
 | ADR-017 | Audio files served via CloudFront pre-signed URLs; never proxied through API servers | Proxying audio through FastAPI would consume worker memory and bandwidth for no benefit; CDN handles caching and global delivery | 2026-03-23 | accepted |
 | ADR-018 | PgBouncer in transaction-pooling mode in front of PostgreSQL | Each uvicorn worker holds an asyncpg pool; without PgBouncer, total connections = workers × pool_max, easily exceeding PostgreSQL max_connections | 2026-03-23 | accepted |
+| ADR-019 | All report queries route to PostgreSQL read replica via materialized views | Report aggregations are expensive; running them on the primary would compete with write-path queries and entitlement lookups that students depend on | 2026-03-23 | proposed |
+| ADR-020 | Materialized views refreshed nightly (not real-time) with 24-hour stale tolerance for most reports | Real-time aggregation would require expensive incremental computation on every event; nightly refresh is accurate enough for teacher planning and avoids write amplification | 2026-03-23 | proposed |
+| ADR-021 | Feedback summary refreshed hourly (not nightly) | Feedback is time-sensitive — a content error reported by students should be visible to a teacher within the hour, not the next morning | 2026-03-23 | proposed |
 
 ---
 
@@ -404,3 +431,4 @@
 | 2026-03-23 | 0.1.0 | — | Initial requirements document created from architecture review |
 | 2026-03-23 | 0.2.0 | — | Added school/teacher management, custom curriculum, student association, extended analytics, and feedback requirements (Phases 8–10) |
 | 2026-03-23 | 0.3.0 | — | Added BACKEND_ARCHITECTURE.md; updated NFR-PERF, NFR-REL, NFR-OBS to align with SLOs and architecture decisions; added ADR-015 through ADR-018 |
+| 2026-03-23 | 0.4.0 | — | Added Teacher & School Reporting system: 6 report types, CSV export, threshold alerts, weekly digest, 3 new materialized views, Phase 11 |

@@ -229,6 +229,14 @@ Never use `print()`. Backend logs go to stdout (captured by the container runtim
 - **Attempt number is server-authoritative:** never trust the client's `attempt_number`. The backend computes it from the database before inserting a new session. If a client submits an `attempt_number`, discard it.
 - **Passing threshold config:** the pass/fail threshold (default 70%) is a server-side config value (`QUIZ_PASS_THRESHOLD = 0.70`), not hardcoded per endpoint. Teachers cannot currently change it; but it must not be a magic number scattered through the codebase.
 
+### Reporting
+
+- **All report endpoints use `get_read_db`** — never `get_db`. Add a linter check or assertion to enforce this at startup if possible.
+- **Report response shape includes `data_as_of`** — every report endpoint response must include a top-level `"data_as_of": "ISO8601"` field containing the refresh timestamp of the underlying materialized view. Read this from a `mv_refresh_log` table or `pg_stat_user_tables.last_autoanalyze`.
+- **Materialized views are the only source for report data** — do not write ad-hoc `SELECT … GROUP BY` queries in report endpoints. All aggregation lives in the materialized view definitions. This keeps query latency predictable and testable.
+- **CSV export is always async** — `POST /reports/.../export` returns `{job_id}` immediately. The Celery task generates the CSV, writes it to a temp S3 path, and returns a pre-signed download URL valid for 1 hour. Never stream CSV bytes synchronously from an API response.
+- **Alert thresholds default to sensible values** — ship `report_alert_settings` with defaults (`pass_rate_threshold=50`, `feedback_volume_threshold=3`, `inactive_days=14`) so the alert system works out-of-the-box without teacher configuration.
+
 ### Testing
 - **Backend:** pytest + `httpx.AsyncClient` for endpoint tests. Mock PostgreSQL with `pytest-asyncio` + an in-memory SQLite or `testing.postgresql`. Never hit a real database in CI. Mock Stripe SDK calls.
 - **Mobile:** pytest for logic (sync manager, cache, queue, i18n loader). No Kivy widget tests in CI.
@@ -299,6 +307,10 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 33. **Not sizing the connection pool relative to worker count** — total PostgreSQL connections = `num_workers × pool_max_size`. With 4 workers and `pool_max=20` that is 80 connections. Add Celery workers and you can hit PostgreSQL `max_connections` (default 100) instantly. Always deploy PgBouncer in transaction-pooling mode; set `pool_max` per worker to 10–20; set PostgreSQL `max_connections` to ≥ 200.
 34. **Invalidating Redis cache but forgetting the CDN** — when a content version bump occurs, clearing Redis L2 is not enough. CloudFront may still serve the old `lesson_en.json` from edge caches for up to 1 hour (or the configured TTL). On pipeline completion, call `cloudfront.create_invalidation(paths=[f"/{curriculum_id}/{unit_id}/*"])` for every rebuilt unit.
 35. **Deploying Redis without AOF persistence** — if Redis restarts with `appendonly no`, all cached entitlements, JWT refresh tokens, rate limit counters, and pipeline job states are lost. Every student is immediately logged out. Every rate limit counter resets. Set `appendonly yes` and `appendfsync everysec` before going to production.
+36. **Running report queries against the PostgreSQL primary** — report aggregations (`GROUP BY`, `AVG`, `COUNT` across sessions and lesson_views) are expensive and long-running. They must route to the read replica. Always use the `get_read_db` dependency in report endpoints, never `get_db`. Running these on the primary competes with entitlement checks and progress writes.
+37. **Refreshing all materialized views on every report request** — `REFRESH MATERIALIZED VIEW` takes a write lock and can take seconds on large tables. Only Celery Beat should trigger routine refreshes (nightly). The on-demand refresh endpoint (`POST /reports/.../refresh`) must be rate-limited (once per 30 minutes per school) and dispatched as a Celery task, never awaited synchronously.
+38. **Not showing the "last updated" timestamp on reports** — materialized views are stale by design (up to 24 hours). Without a visible timestamp, teachers may act on yesterday's data thinking it is current. Always include `data_as_of: ISO8601` in every report response body.
+39. **Sending weekly digest emails in a single synchronous loop** — the digest task may need to send to hundreds of teachers. Dispatch one Celery sub-task per recipient (`send_digest_email.apply_async(args=[teacher_id])`). Never block the Beat task waiting for email delivery.
 
 ---
 
