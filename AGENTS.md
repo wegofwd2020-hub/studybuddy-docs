@@ -5,6 +5,8 @@
 > Read this before touching any code. It covers the system design, conventions,
 > layer boundaries, and the most common mistakes to avoid.
 
+> **Requirements tracking:** feature requirements, non-functional requirements, and architectural decisions are tracked in [REQUIREMENTS.md](REQUIREMENTS.md). Check the status column before implementing — a requirement may be `deferred` or already `in-progress`.
+
 ---
 
 ## Project Status
@@ -179,6 +181,45 @@ log = get_logger("component")   # "api", "sync", "cache", "pipeline", "auth", "s
 ```
 Never use `print()`. Backend logs go to stdout (captured by the container runtime). Mobile logs go to the same rolling file structure as the Free edition.
 
+### Security
+
+- **Rate limiting:** apply at the middleware layer (not in individual route handlers). Use `slowapi` or a gateway (nginx/Caddy). Auth endpoints: 10 req/min per IP. Content endpoints: 100 req/min per student JWT.
+- **Secrets:** all secrets via environment variables. Never commit `.env` files. In production, source from AWS Secrets Manager, Vault, or equivalent. The `config.py` in each layer uses `pydantic-settings` with `env` fields — no defaults for secrets (fail fast if missing).
+- **CORS:** configure `CORSMiddleware` with an explicit `allow_origins` list from env var `ALLOWED_ORIGINS`. Default deny.
+- **Input validation:** define all request bodies as Pydantic models. Never access `request.body()` directly in a route handler for business logic.
+- **Password hashing:** bcrypt with cost factor ≥ 12. Run in thread pool executor to avoid blocking the event loop.
+
+### Compliance
+
+- **Age gate:** the registration handler checks `dob` (if provided) or infers age from `grade`. If under 13, set `account_status = "pending_parental_consent"` and send a consent email to the provided guardian address. Block content access until `account_status = "active"`.
+- **Account deletion:** `DELETE /auth/account` must remove or anonymise all records referencing the `student_id` in a single transaction: `students`, `sessions`, `progress_answers`, `subscriptions`. Cancel the Stripe subscription first (call Stripe API), then delete local records. Return 200 only after all data is gone.
+- **Forgot-password emails:** always respond HTTP 200 regardless of whether the email exists. Log internally but never surface to the caller.
+
+### Observability
+
+- **Structured logging:** use `get_logger("component")` from `utils/logger.py`. Every log entry must include `component`, `action`, and any relevant IDs (`student_id`, `unit_id`, `session_id`). Never log passwords, tokens, or Stripe keys.
+- **Sentry:** initialise `sentry_sdk` in `backend/main.py` and `mobile/main.py` using `SENTRY_DSN` from env. Use `sentry_sdk.set_user({"id": student_id})` at the start of authenticated requests. Strip PII from breadcrumbs with a `before_send` hook.
+- **Health check depth:** `GET /health` must verify: (1) a simple DB query (`SELECT 1`), (2) a Redis ping, (3) that the Content Store path exists and is readable. Return 503 if any check fails.
+
+### Pipeline
+
+- **Idempotency:** at the start of each unit build, read the existing `meta.json`. If `content_version` matches the target version and all expected files are present, skip unless `--force` is passed.
+- **Schema validation:** after each Claude call, run `jsonschema.validate(response, SCHEMA[content_type])`. On `ValidationError`, log the raw response and retry (up to 3 times). After 3 failures, append to `pipeline_failures.json` and continue to the next unit.
+- **Cost tracking:** maintain a running `tokens_used` counter across the pipeline run. If `tokens_used * TOKEN_COST_USD > MAX_PIPELINE_COST_USD`, abort the run and log a warning. Default `MAX_PIPELINE_COST_USD = 50.0`.
+
+### School & Curriculum
+
+- **Curriculum resolver:** implement as FastAPI middleware or a dependency (`get_resolved_curriculum_id(student=Depends(get_current_student))`). Every content endpoint calls this dependency — never inline the resolution logic per-endpoint.
+- **XLSX parsing:** use `openpyxl` (not `xlrd`; xlrd dropped xlsx support). Iterate rows explicitly; do not assume the first row is always the header. Strip whitespace from all cell values. Return a structured `ParseResult` with `units: list[UnitRow]` and `errors: list[RowError]`.
+- **Pipeline async dispatch:** use Celery with Redis as broker, or Python's `asyncio.create_task` for Phase 8. Store job state (`pending → running → done/failed`) in Redis keyed by `job_id` with a 24-hour TTL. The status polling endpoint reads from Redis.
+- **School content isolation:** the Content Store path prefix for school curricula is `{curriculum_id}/` (a UUID). This provides natural isolation — no school can ever guess another school's curriculum_id to retrieve content.
+
+### Analytics
+
+- **Lesson view events use the offline queue:** `POST /analytics/lesson/start` and `POST /analytics/lesson/end` are queued in the same local SQLite `event_queue` as progress events. They share the same SyncManager flush path. Include `event_type: "lesson_start" | "lesson_end"` to distinguish them server-side.
+- **Attempt number is server-authoritative:** never trust the client's `attempt_number`. The backend computes it from the database before inserting a new session. If a client submits an `attempt_number`, discard it.
+- **Passing threshold config:** the pass/fail threshold (default 70%) is a server-side config value (`QUIZ_PASS_THRESHOLD = 0.70`), not hardcoded per endpoint. Teachers cannot currently change it; but it must not be a magic number scattered through the codebase.
+
 ### Testing
 - **Backend:** pytest + `httpx.AsyncClient` for endpoint tests. Mock PostgreSQL with `pytest-asyncio` + an in-memory SQLite or `testing.postgresql`. Never hit a real database in CI. Mock Stripe SDK calls.
 - **Mobile:** pytest for logic (sync manager, cache, queue, i18n loader). No Kivy widget tests in CI.
@@ -227,27 +268,66 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 11. **Generating TTS at request time** — audio files must be pre-built in the pipeline. The `GET /content/{unit_id}/lesson/audio` endpoint serves a file; it never calls a TTS API at request time.
 12. **Showing the Experiment button for all units** — only show `ExperimentScreen` if `GET /content/{unit_id}/experiment` returns HTTP 200. Check at unit load time and cache the result.
 13. **Storing Stripe keys in the mobile app** — the mobile app never touches Stripe directly. It only calls `POST /subscription/checkout` to get a checkout URL, then opens that URL in a browser.
+14. **Accepting Stripe webhooks without signature verification** — always call `stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)` first. A `SignatureVerificationError` must return HTTP 400 immediately. Failing to verify allows anyone to fake subscription events.
+15. **No idempotency on the Stripe webhook handler** — log the `stripe_event_id` to the `stripe_events` table before processing. If the ID already exists, return HTTP 200 immediately without re-processing. Stripe retries on failure; double-processing activates subscriptions twice or credits accounts twice.
+16. **Inline SQL strings with f-string interpolation** — always use SQLAlchemy ORM or parameterized queries. Never build a SQL string with user-controlled data inside it. FastAPI + Pydantic validate shape but not content; SQL injection is still possible if you bypass the ORM.
+17. **Emitting a password reset response that leaks whether an email exists** — `POST /auth/forgot-password` must always return HTTP 200 regardless of whether the email is registered. A different response for registered vs. unregistered emails enables email enumeration.
+18. **Blocking on bcrypt in an async endpoint** — bcrypt is CPU-bound and will block the FastAPI event loop. Run it in a thread pool: `await asyncio.get_event_loop().run_in_executor(None, bcrypt.checkpw, ...)`.
+19. **Pipeline writing content while students are mid-session** — use `content_version` in `meta.json`. Bump the version atomically (write to a temp path, rename). Mobile caches by version; students mid-session complete against the version they started. Never overwrite in place.
+20. **Calling the pipeline without pinning the Claude model ID** — if `CLAUDE_MODEL` is not set to a specific model string, a future SDK update could silently switch models and produce inconsistently styled content mid-grade. Pin explicitly in `pipeline/config.py`.
+21. **No cache size limit on the mobile device** — without a `MAX_CACHE_MB` limit, downloading all grades × 3 languages × audio can exhaust storage on low-end devices. The cache manager must evict least-recently-used entries when the limit is approached.
+22. **Launching app version checks after user-facing content loads** — check `GET /app/version` early in the app startup flow, before rendering content screens. An outdated client hitting a changed API will produce cryptic errors, not a clear upgrade prompt.
+23. **Resolving curriculum_id from grade number at request time without caching** — curriculum resolution (student.school_id → active curriculum for grade + year → curriculum_id) involves a DB lookup. Cache the resolved `curriculum_id` in Redis per student (same TTL as entitlement cache). Invalidate on school transfer, curriculum activation, or subscription change.
+24. **Generating content for a custom curriculum without validating unit codes first** — unit codes must be unique within a curriculum. A duplicate unit code in an XLSX upload causes two units to write to the same Content Store path, silently overwriting each other. Validate uniqueness before writing any units.
+25. **Treating XLSX parsing errors as exceptions** — the upload handler must return HTTP 400 with a structured list of row-level errors (row number, column, error description) rather than a 500. Teachers cannot fix what they cannot see. Never let a pandas/openpyxl exception bubble up as a 500 to the client.
+26. **Blocking the pipeline job on the HTTP request** — `POST /curriculum/pipeline/trigger` must return a `job_id` immediately (202 Accepted) and run the pipeline asynchronously (Celery task or background thread). Pipeline runs for large curricula take minutes; do not hold the HTTP connection open.
+27. **Allowing unrestricted access to school curricula** — when `restrict_access = true`, the content resolver must verify `school_enrolments` membership before serving any unit. Do not rely on the client knowing which units to request; enforce on every content endpoint.
+28. **No attempt_number on quiz sessions** — without `attempt_number`, analytics cannot distinguish a student's first attempt from their fifth. Compute `attempt_number` server-side as `COUNT(*) + 1` from prior sessions for (student_id, unit_id, curriculum_id) before inserting the new session row. Never compute it client-side.
+29. **Storing teacher credentials in the student JWT** — teachers and students have separate JWT secrets and separate auth endpoints. A student JWT must never grant access to teacher endpoints, and vice versa. Middleware must check both `role` and `resource ownership` (e.g., a teacher can only access analytics for their own school).
+30. **Sending pipeline failure emails with no actionable detail** — when a unit fails pipeline generation, the email to the teacher must include: unit name, unit code, failure reason (schema validation vs. API error), and a link to the admin panel. "Your pipeline failed" with no detail forces a support request.
 
 ---
 
 ## Phase Checklist
 
 ### Phase 1 — Backend Foundation
-- [ ] FastAPI skeleton with `/health`
+- [ ] FastAPI skeleton with `/health` (deep check: DB + Redis + Content Store)
 - [ ] PostgreSQL schema: `students`, `sessions`
-- [ ] Auth endpoints: register (with `locale`), login, refresh
+- [ ] Alembic migration scaffold; all schema changes via migrations
+- [ ] Auth endpoints: register (with `locale`, `dob` for COPPA), login, refresh
+- [ ] Auth endpoints: forgot-password, reset-password
+- [ ] Parental consent flow: block account activation for under-13 until guardian consent
+- [ ] Rate limiting middleware on auth endpoints (10 req/min per IP)
+- [ ] Account lockout: 5 failed logins → 15-minute Redis-backed cooldown
 - [ ] Curriculum endpoints: list grades, get grade detail
+- [ ] `PATCH /student/profile` endpoint
+- [ ] `DELETE /auth/account` endpoint (GDPR erasure)
 - [ ] Mobile: replace local registration with backend auth (include language picker)
 - [ ] Mobile: JWT stored securely; locale read from JWT; sent on every request
+- [ ] Sentry SDK initialised in backend and mobile
+- [ ] CORS policy configured via `ALLOWED_ORIGINS` env var
+- [ ] HTTPS enforced; HTTP → HTTPS redirect configured
 
 ### Phase 2 — Content Pipeline + Delivery (English)
 - [ ] `pipeline/build_grade.py` CLI working end-to-end (`--grade N --lang en`)
+- [ ] Pipeline is idempotent: skip units already at target `content_version` unless `--force`
+- [ ] Pipeline pins Claude model ID in `pipeline/config.py`; never uses implicit latest
+- [ ] Pipeline validates each generated JSON against schema before writing; retries up to 3×
+- [ ] Pipeline emits per-unit structured logs (tokens, cost estimate, duration)
+- [ ] Pipeline emits a JSON run summary on completion
+- [ ] Pipeline spend cap: abort if estimated cost exceeds `MAX_PIPELINE_COST_USD`
 - [ ] Content Store populated for at least one grade in English
 - [ ] Backend Content Service endpoints live
+- [ ] Rate limiting on content endpoints (100 req/min per student JWT)
 - [ ] Entitlement middleware: track `lessons_accessed`, return HTTP 402 after 2 for free tier
+- [ ] `POST /content/{unit_id}/report` endpoint
+- [ ] `GET /app/version` endpoint
 - [ ] Mobile: lesson + quiz loaded from backend, not Claude
-- [ ] Mobile: local SQLite cache with `content_version + lang` check
+- [ ] Mobile: local SQLite cache with `content_version + lang` check; enforce `MAX_CACHE_MB` eviction
+- [ ] Mobile: app version check on launch; prompt upgrade if below minimum version
 - [ ] Mobile: `SubscriptionScreen` stub (no real payment)
+- [ ] Structured log aggregation platform configured (CloudWatch / ELK / Loki)
+- [ ] Uptime monitoring on `/health` (external ping, 60-second interval)
 
 ### Phase 3 — Progress Tracking
 - [ ] Progress endpoints: session, answer, session/end
@@ -268,9 +348,14 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 
 ### Phase 5 — Subscription + Payments
 - [ ] PostgreSQL `subscriptions` table
+- [ ] PostgreSQL `stripe_events` table (dedup + audit log)
 - [ ] `POST /subscription/checkout` → Stripe Checkout Session URL
-- [ ] `POST /subscription/webhook` → handle Stripe lifecycle events
+- [ ] `POST /subscription/webhook` → validate signature, dedup by `stripe_event_id`, handle lifecycle events
+- [ ] Handle `invoice.payment_failed` with 3-day grace period before locking content
+- [ ] Force-expire entitlement cache in Redis on cancellation / downgrade
+- [ ] `DELETE /auth/account` cancels Stripe subscription before deleting local records
 - [ ] Entitlement cache in Redis (5-minute TTL)
+- [ ] Alert configured for Stripe webhook delivery failures
 - [ ] Mobile: `SubscriptionScreen` with real plan cards and Stripe checkout
 
 ### Phase 6 — Experiment Visualization
@@ -281,7 +366,52 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] Experiment content cached alongside lesson JSON
 
 ### Phase 7 — Admin Dashboard + Analytics
+- [ ] Admin endpoints protected by separate admin JWT role (not student JWT)
 - [ ] Admin API: content build status, per-unit/language regeneration
+- [ ] `GET /admin/pipeline/status` — last run time, units built/missing/failed
+- [ ] Audit log for all admin actions (who triggered what, when)
 - [ ] Subscription analytics: MRR, churn, conversion
 - [ ] Aggregate analytics: struggle rate per question
+- [ ] Content report review queue: surface units exceeding report threshold
 - [ ] Simple dashboard UI
+
+### Phase 8 — School & Teacher Registration + Curriculum Upload
+- [ ] PostgreSQL schema: `schools`, `teachers`, `curricula`, `curriculum_units` (Alembic migration)
+- [ ] `POST /schools/register` — auto-approve; create school_admin teacher account
+- [ ] Teacher JWT with `{teacher_id, school_id, role}` payload
+- [ ] Teacher auth middleware: separate from student JWT; role-checked on all teacher endpoints
+- [ ] `GET /curriculum/template` — serve pre-formatted XLSX template
+- [ ] `POST /curriculum/upload` — parse XLSX (openpyxl), validate, return row-level errors, store as `curriculum_units`
+- [ ] `POST /curriculum/pipeline/trigger` — dispatch async pipeline job; return `job_id`
+- [ ] Pipeline reads units from DB when `curriculum_id` is provided (not from local JSON file)
+- [ ] Content Store path: `{curriculum_id}/{unit_id}/…`
+- [ ] `GET /curriculum/pipeline/{job_id}/status` — read job state from Redis
+- [ ] Email teacher on pipeline completion or failure (per-unit failure detail)
+- [ ] `python pipeline/seed_default.py --year 2026` seeds default curricula from `data/grade*_stem.json`
+
+### Phase 9 — Student–School Association + Curriculum Routing
+- [ ] PostgreSQL schema: `school_enrolments` (Alembic migration)
+- [ ] `POST /schools/{school_id}/enrolment` — teacher uploads student email roster
+- [ ] Student registration: match email against pending enrolments; set `student.school_id` on match
+- [ ] Student registration: optional `enrolment_code` field
+- [ ] Curriculum resolver dependency: resolves `curriculum_id` from student + grade + year; cached in Redis
+- [ ] Curriculum resolver fallback: unaffiliated students → `default-{year}-g{grade}`
+- [ ] `restrict_access` enforcement: HTTP 403 for non-enrolled students on restricted curricula
+- [ ] `PUT /curriculum/{curriculum_id}/activate` — activates, archives previous
+- [ ] Mobile: Settings shows enrolled school name and "Leave school" option
+- [ ] Cache invalidation: clear curriculum resolver cache on school transfer or curriculum activation
+
+### Phase 10 — Extended Analytics + Student Feedback
+- [ ] PostgreSQL schema: `lesson_views`, `feedback` (Alembic migration)
+- [ ] Alembic migration: add `attempt_number`, `curriculum_id`, `passed` to `sessions`
+- [ ] `POST /analytics/lesson/start` and `POST /analytics/lesson/end` endpoints
+- [ ] Mobile: lesson start/end events queued in `event_queue` alongside progress events
+- [ ] Attempt number: computed server-side before session insert
+- [ ] `passed` flag: set on `POST /progress/session/end` based on `QUIZ_PASS_THRESHOLD`
+- [ ] `GET /analytics/student/me` — student self-service metrics
+- [ ] `GET /analytics/school/{school_id}/class` — teacher class analytics
+- [ ] Struggle flag: query surfacing units where mean_attempts > 2 or pass_rate < 50%
+- [ ] `POST /feedback` — rate-limited to 5/student/hour; store in `feedback` table
+- [ ] `GET /admin/feedback` — paginated, filterable
+- [ ] Mobile: "Give Feedback" button on lesson, result, and Settings screens
+- [ ] Mobile: Progress screen shows student analytics dashboard

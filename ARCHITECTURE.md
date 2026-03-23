@@ -2,6 +2,7 @@
 
 **Version:** 0.2.0 (Design Phase — Feature Expansion)
 **Last updated:** 2026-03-23
+**Requirements tracking:** [REQUIREMENTS.md](REQUIREMENTS.md)
 
 ---
 
@@ -376,9 +377,13 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
 
 | Method | Endpoint | Body | Returns |
 |---|---|---|---|
-| POST | `/auth/register` | `{name, email, password, grade, locale}` | `{token, student_id}` |
+| POST | `/auth/register` | `{name, email, password, grade, locale, dob?}` | `{token, student_id}` |
 | POST | `/auth/login` | `{email, password}` | `{token, student_id}` |
 | POST | `/auth/refresh` | — | `{token}` |
+| POST | `/auth/forgot-password` | `{email}` | `200` (always; no email enumeration) |
+| POST | `/auth/reset-password` | `{token, new_password}` | `{token, student_id}` |
+| PATCH | `/student/profile` | `{name?, locale?, grade?}` | `{student}` |
+| DELETE | `/auth/account` | — | `200` (GDPR erasure) |
 
 ### Curriculum
 
@@ -397,6 +402,13 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
 | GET | `/content/{unit_id}/practice` | Practice test set (locale from JWT) |
 | GET | `/content/{unit_id}/tutorial` | Remediation content (locale from JWT) |
 | GET | `/content/{unit_id}/experiment` | Experiment visualization JSON (locale from JWT; 404 if no lab) |
+
+### Content (additional)
+
+| Method | Endpoint | Body | Returns |
+|---|---|---|---|
+| POST | `/content/{unit_id}/report` | `{category, message?}` | `200` |
+| GET | `/app/version` | — | `{min_version, latest_version}` |
 
 ### Progress
 
@@ -417,6 +429,45 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
 | POST | `/subscription/webhook` | Stripe event body | `200` |
 | DELETE | `/subscription` | — | `200` (cancel at period end) |
 
+### School & Teacher
+
+| Method | Endpoint | Body | Returns |
+|---|---|---|---|
+| POST | `/schools/register` | `{school_name, contact_email, country}` | `{school_id, teacher_id}` |
+| GET | `/schools/{school_id}` | — | School profile |
+| POST | `/schools/{school_id}/teachers/invite` | `{email, name}` | `200` |
+| POST | `/schools/{school_id}/enrolment` | `{student_emails: [...]}` | `{enrolled, already_enrolled, not_found}` |
+| DELETE | `/schools/{school_id}/enrolment/{student_email}` | — | `200` |
+| GET | `/schools/{school_id}/enrolment` | — | Roster with enrolment status |
+
+### Curriculum
+
+| Method | Endpoint | Body | Returns |
+|---|---|---|---|
+| POST | `/curriculum/upload` | multipart XLSX or `{grade, units: [...]}` JSON | `{curriculum_id, status, errors}` |
+| GET | `/curriculum/{curriculum_id}` | — | Curriculum metadata + unit list |
+| PUT | `/curriculum/{curriculum_id}/activate` | — | `200` (activates, archives previous) |
+| POST | `/curriculum/pipeline/trigger` | `{curriculum_id, lang?, force?}` | `{job_id}` |
+| GET | `/curriculum/pipeline/{job_id}/status` | — | `{status, built, failed, progress_pct}` |
+| GET | `/curriculum/template` | — | XLSX template file download |
+
+### Analytics
+
+| Method | Endpoint | Returns |
+|---|---|---|
+| POST | `/analytics/lesson/start` | `{unit_id, curriculum_id}` → `{view_id}` |
+| POST | `/analytics/lesson/end` | `{view_id, duration_s, audio_played, experiment_viewed}` → `200` |
+| GET | `/analytics/student/me` | Student's own metrics (scores, time, attempts) |
+| GET | `/analytics/school/{school_id}/class` | Aggregate class metrics per unit |
+| GET | `/analytics/unit/{unit_id}/summary` | Platform-wide metrics for a unit (admin only) |
+
+### Feedback
+
+| Method | Endpoint | Body | Returns |
+|---|---|---|---|
+| POST | `/feedback` | `{category, unit_id?, message, rating?}` | `{feedback_id}` |
+| GET | `/admin/feedback` | — | Paginated feedback list with filters |
+
 ---
 
 ## Data Models
@@ -431,7 +482,9 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
   "locale": "en",
   "created_at": "ISO8601",
   "subscription": "free | monthly | annual",
-  "lessons_accessed": 0
+  "lessons_accessed": 0,
+  "school_id": "uuid | null",
+  "enrolled_at": "ISO8601 | null"
 }
 ```
 
@@ -454,13 +507,16 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
   "session_id": "uuid",
   "student_id": "uuid",
   "unit_id": "G8-MATH-001",
+  "curriculum_id": "uuid",
   "grade": 8,
   "subject": "Mathematics",
   "started_at": "ISO8601",
   "ended_at": "ISO8601",
   "score": 7,
   "total_questions": 8,
-  "completed": true
+  "completed": true,
+  "attempt_number": 1,
+  "passed": true
 }
 ```
 
@@ -474,6 +530,130 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
   "correct_answer": 1,
   "correct": false,
   "ms_taken": 12400
+}
+```
+
+### Stripe Event (dedup + audit log)
+```json
+{
+  "stripe_event_id": "evt_xxx",
+  "event_type": "checkout.session.completed",
+  "processed_at": "ISO8601",
+  "outcome": "ok | error",
+  "error_detail": "string | null"
+}
+```
+
+### Content Report
+```json
+{
+  "report_id": "uuid",
+  "unit_id": "G8-MATH-001",
+  "student_id": "uuid",
+  "category": "wrong_answer | confusing | inappropriate | other",
+  "message": "string | null",
+  "reported_at": "ISO8601",
+  "reviewed": false
+}
+```
+
+### School
+```json
+{
+  "school_id": "uuid",
+  "name": "Springfield High School",
+  "contact_email": "admin@sphs.edu",
+  "country": "US",
+  "enrolment_code": "SPHS-2026",
+  "status": "pending | active | suspended",
+  "created_at": "ISO8601"
+}
+```
+
+### Teacher
+```json
+{
+  "teacher_id": "uuid",
+  "school_id": "uuid",
+  "name": "string",
+  "email": "string",
+  "role": "teacher | school_admin",
+  "created_at": "ISO8601"
+}
+```
+
+### Curriculum
+```json
+{
+  "curriculum_id": "uuid | default-{year}-g{grade}",
+  "school_id": "uuid | null",
+  "year": 2026,
+  "grade": 8,
+  "name": "Grade 8 STEM 2026",
+  "source_type": "default | xlsx_upload | ui_form",
+  "status": "draft | building | active | archived | failed",
+  "restrict_access": false,
+  "created_by": "teacher_id | null",
+  "created_at": "ISO8601",
+  "activated_at": "ISO8601 | null"
+}
+```
+
+### Curriculum Unit
+```json
+{
+  "unit_id": "string",
+  "curriculum_id": "uuid",
+  "subject": "Mathematics",
+  "unit_name": "Algebra – Linear Equations",
+  "objectives": ["Solve linear equations", "Graph functions"],
+  "has_lab": false,
+  "lab_description": "string | null",
+  "sequence": 1,
+  "content_status": "pending | built | failed"
+}
+```
+
+### School Enrolment
+```json
+{
+  "enrolment_id": "uuid",
+  "school_id": "uuid",
+  "student_email": "string",
+  "student_id": "uuid | null",
+  "added_by_teacher_id": "uuid",
+  "added_at": "ISO8601",
+  "status": "pending | active | removed"
+}
+```
+
+### Lesson View
+```json
+{
+  "view_id": "uuid",
+  "student_id": "uuid",
+  "unit_id": "string",
+  "curriculum_id": "uuid",
+  "started_at": "ISO8601",
+  "ended_at": "ISO8601 | null",
+  "duration_s": 0,
+  "audio_played": false,
+  "experiment_viewed": false
+}
+```
+
+### Feedback
+```json
+{
+  "feedback_id": "uuid",
+  "student_id": "uuid",
+  "category": "content | ux | general",
+  "unit_id": "string | null",
+  "curriculum_id": "uuid | null",
+  "message": "string",
+  "rating": "1-5 | null",
+  "submitted_at": "ISO8601",
+  "reviewed": false
 }
 ```
 
@@ -495,6 +675,431 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
   experiment_{lang}.json  ← experiment guide (only if unit has labs)
   meta.json               ← generated_at, model_version, content_version, langs_built
 ```
+
+---
+
+## Security Controls
+
+### Rate Limiting
+
+Apply at the reverse proxy or FastAPI middleware layer. Do not rely on the database for enforcement.
+
+| Endpoint group | Limit |
+|---|---|
+| `POST /auth/login`, `POST /auth/register` | 10 req / min per IP |
+| `POST /auth/forgot-password` | 5 req / min per IP |
+| Content endpoints (`/content/*`) | 100 req / min per student JWT |
+| Stripe webhook (`/subscription/webhook`) | No rate limit (Stripe IPs only via allowlist) |
+
+### Account Lockout
+
+After 5 consecutive failed login attempts for the same email, the account is locked for 15 minutes. A failed attempt counter is stored in Redis with a 15-minute TTL, reset on successful login.
+
+### JWT Key Rotation
+
+- JWT header includes a `kid` (key ID) field.
+- The backend maintains up to 2 active signing keys simultaneously.
+- Old tokens signed with the previous key remain valid until they expire naturally.
+- Rotation procedure: generate new key → deploy with both keys active → wait for old tokens to expire → remove old key.
+
+### CORS Policy
+
+The backend sets an explicit CORS allowlist:
+- Mobile app: communicates via native HTTPS (no browser origin; not subject to CORS).
+- Admin dashboard: allowed origin set via `ALLOWED_ORIGINS` env var.
+- Default: deny all origins not in allowlist.
+
+### Secrets Management
+
+| Secret | Storage |
+|---|---|
+| `ANTHROPIC_API_KEY` | Backend env var (pipeline only) |
+| `JWT_SECRET` | Backend env var; use secrets manager in production |
+| `STRIPE_SECRET_KEY` | Backend env var; use secrets manager in production |
+| `STRIPE_WEBHOOK_SECRET` | Backend env var |
+| `TTS_API_KEY` | Pipeline env var |
+| `DATABASE_URL` | Backend env var; use secrets manager in production |
+
+In production, source all secrets from AWS Secrets Manager, HashiCorp Vault, or equivalent. Never commit secrets to git.
+
+### Redis Security
+
+- Enable Redis `requirepass` authentication.
+- Enable `AOF` persistence (append-only file) so a Redis restart does not invalidate all active sessions.
+- Configure `maxmemory-policy allkeys-lru` to prevent unbounded growth.
+- Redis stores only `student_id`-keyed data — no raw passwords, no card data, no PII beyond student_id.
+
+### Input Validation
+
+All request bodies are defined as Pydantic models. FastAPI validates automatically and returns HTTP 422 on schema violations. Never pass raw request data to a database query; use SQLAlchemy ORM exclusively (no raw SQL strings with f-string interpolation).
+
+### Stripe Webhook Integrity
+
+The `/subscription/webhook` handler must call `stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)` and reject with HTTP 400 if it raises `stripe.error.SignatureVerificationError`. Log the `stripe_event_id` to a `stripe_events` table for deduplication and audit.
+
+---
+
+## Compliance & Privacy
+
+### COPPA (Children's Online Privacy Protection Act)
+
+This product serves students in Grades 5–12, which includes children under 13. COPPA applies for US distribution.
+
+- At registration, collect the student's date of birth (or grade as a proxy for age).
+- If age < 13, collect a **parent/guardian email address** and send a consent request.
+- Account activation is blocked until parental consent is confirmed.
+- Store a `parental_consent` record (guardian email, consent timestamp, IP) in PostgreSQL.
+- Do not collect any information beyond name, email, grade, and locale from minors without verifiable parental consent.
+
+### GDPR (EU General Data Protection Regulation)
+
+- **Right to erasure:** `DELETE /auth/account` must delete all PII and progress records associated with the student within 30 days. Stripe data is handled via Stripe's customer deletion API.
+- **Data minimisation:** collect only name, email, grade, locale. No location, no device ID, no behavioural fingerprinting.
+- **Consent at registration:** display a privacy policy link and require explicit acceptance before account creation.
+- **Data retention:** progress records are retained for the lifetime of the account, then anonymised (strip `student_id`) after account deletion.
+
+### Payment Data
+
+The backend never stores card numbers, CVV, or bank account details. Stripe handles all payment data. The backend stores only `stripe_customer_id` and `stripe_subscription_id` to reference Stripe objects.
+
+### Password Reset Token Security
+
+- Reset tokens are single-use UUIDs stored in Redis with a 1-hour TTL.
+- Consuming a token deletes it immediately.
+- After account lockout, password reset is the only path to re-enable login.
+
+---
+
+## Observability & Monitoring
+
+### Structured Logging
+
+All backend components use structured JSON logging. Log entries include:
+```json
+{"timestamp": "ISO8601", "level": "INFO", "component": "content", "student_id": "uuid", "unit_id": "G8-MATH-001", "action": "lesson_served", "locale": "fr", "duration_ms": 45}
+```
+Never log passwords, JWT tokens, Stripe keys, or raw payment data. Backend logs go to stdout, captured by the container runtime and forwarded to a log aggregation platform (CloudWatch, ELK, Loki, or equivalent).
+
+### Error Tracking
+
+Integrate Sentry in both the backend and mobile app:
+- Backend: `sentry-sdk[fastapi]` captures unhandled exceptions with request context (endpoint, student_id if authenticated).
+- Mobile: `sentry-sdk` captures unhandled exceptions and offline queues crash reports for upload on next launch.
+- Strip PII from Sentry events before transmission.
+
+### Health Check
+
+`GET /health` is a deep health check that reports the status of every dependency:
+
+```json
+{
+  "status": "ok",
+  "checks": {
+    "db": "ok",
+    "redis": "ok",
+    "content_store": "ok"
+  },
+  "version": "0.2.0"
+}
+```
+
+If any check fails, the endpoint returns HTTP 503. Use this as the readiness probe in container orchestration.
+
+### Metrics
+
+Expose a `/metrics` endpoint (Prometheus format) or push to Datadog/CloudWatch. Key metrics:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `http_request_duration_seconds` | histogram | endpoint, method, status |
+| `content_cache_hits_total` | counter | layer (redis/disk) |
+| `entitlement_checks_total` | counter | result (allowed/402) |
+| `pipeline_units_built_total` | counter | grade, lang, status |
+| `stripe_webhook_events_total` | counter | event_type, outcome |
+| `progress_events_queued` (mobile) | gauge | — |
+
+### Alerting
+
+| Alert | Condition | Severity |
+|---|---|---|
+| Backend down | `/health` fails 3 consecutive checks (60-second intervals) | Critical |
+| Error rate spike | 5xx rate > 1% of requests over 5 minutes | High |
+| Pipeline failure | Pipeline run exits non-zero | High |
+| Stripe webhook drop | Webhook delivery rate < 95% in 30 minutes | High |
+| Content staleness | `meta.json` `generated_at` is older than curriculum JSON `mtime` by > 7 days | Medium |
+| Redis eviction spike | `evicted_keys` rate > 100/min | Medium |
+
+### Pipeline Run Report
+
+On completion, `build_grade.py` emits a JSON summary:
+```json
+{
+  "grade": 8,
+  "langs": ["en", "fr", "es"],
+  "total_units": 40,
+  "built": 40,
+  "skipped": 0,
+  "failed": 0,
+  "tokens_used": 185000,
+  "estimated_cost_usd": 1.85,
+  "duration_s": 1240
+}
+```
+
+---
+
+## Content Quality Controls
+
+### Schema Validation
+
+After each Claude API call, the pipeline validates the response against a JSON schema before writing to the Content Store:
+- **Lesson:** `synopsis` (string, non-empty) + `key_concepts` (array, length ≥ 3)
+- **Quiz set:** exactly 8 questions, each with `question`, `choices` (array of 4), `correct_answer` (0–3 int), `explanation`
+- **Tutorial:** `explanation` (string) + `worked_examples` (array, length ≥ 1)
+- **Experiment:** `steps` (array, length 5–10), each with `step_number`, `instruction`, `diagram_hint`, `expected_observation`
+
+If validation fails, the pipeline retries up to 3 times before marking the unit as failed and logging the error. Failed units are written to a `pipeline_failures.json` report.
+
+### Model Pinning
+
+The pipeline config specifies an exact Claude model ID:
+```python
+# pipeline/config.py
+CLAUDE_MODEL = "claude-sonnet-4-6"  # pin explicitly — do not use "latest"
+```
+Changing this value is a deliberate act. After a model upgrade, run the pipeline in a staging Content Store and compare output quality before promoting to production.
+
+### Human Review Gate (Phase 7+)
+
+In Phase 7, the Admin Dashboard exposes a review queue. The pipeline writes to a `staging/` path in the Content Store. An admin promotes units to `live/` after review. Until Phase 7, the pipeline writes directly to `live/`.
+
+### Student Content Reports
+
+`POST /content/{unit_id}/report` accepts a report category (`wrong_answer`, `confusing`, `inappropriate`, `other`) and an optional message. Reports are stored in a `content_reports` table. The Admin Dashboard surfaces units exceeding a report threshold.
+
+---
+
+## Multi-Tenancy & Curriculum Model
+
+### Overview
+
+The platform supports two curriculum modes that coexist:
+
+| Mode | Who controls it | Scope |
+|---|---|---|
+| **Default** | Platform operator | All unaffiliated students; one set per grade per year |
+| **School / Custom** | Teacher or school admin | Students enrolled with that school only |
+
+Every curriculum — default or custom — is assigned a `curriculum_id`. All content generation and delivery is keyed by `curriculum_id`, not by grade number. This makes the two modes architecturally identical from the pipeline and content service perspective.
+
+### Curriculum Resolution (per student request)
+
+```
+student JWT → school_id (nullable)
+  if school_id:
+    look up active curriculum for (school_id, grade, year)
+    if found → use school curriculum_id
+  if no school_id or no active curriculum:
+    use default curriculum_id for (grade, current_year)
+```
+
+### Content Store Paths
+
+```
+{CONTENT_STORE_PATH}/
+  {curriculum_id}/          ← same structure for default and school curricula
+    {unit_id}/
+      lesson_en.json
+      lesson_fr.json
+      lesson_es.json
+      lesson_en.mp3
+      quiz_set_1_en.json
+      …
+      meta.json
+```
+
+Default curriculum IDs follow the pattern `default-{year}-g{grade}` (e.g. `default-2026-g8`). School curriculum IDs are UUIDs.
+
+---
+
+## School & Teacher Management
+
+### Roles
+
+| Role | Who | Can do |
+|---|---|---|
+| `teacher` | Registered educator | Upload curriculum, manage student roster, view class analytics |
+| `school_admin` | Designated admin at a school | All teacher actions + manage teachers in the school |
+| `platform_admin` | Operator | Manage all schools, trigger pipeline, view all analytics |
+
+Teachers and school admins authenticate separately from students. Their JWT payload includes `{"role": "teacher"|"school_admin", "school_id": "uuid", "teacher_id": "uuid"}`.
+
+### School Registration Flow
+
+```mermaid
+flowchart TD
+    A([Teacher fills registration form]) --> B[POST /schools/register\nschool name · contact email · country]
+    B --> C[Backend creates school record\nstatus = pending]
+    C --> D[Platform admin reviews\nGET /admin/schools/pending]
+    D -->|approve| E[school status = active\nteacher role = school_admin]
+    D -->|reject| F[Rejection email sent]
+    E --> G[Teacher receives welcome email\nwith login credentials]
+```
+
+For Phase 8, auto-approve schools (no manual review step) to keep implementation lean. A `status` field is reserved for future gating.
+
+### Teacher Registration
+
+Once a school is active, additional teachers can be invited:
+- `POST /schools/{school_id}/teachers/invite` — school_admin sends invite email
+- Invited teacher sets password via a one-time token link (same mechanism as password reset)
+
+---
+
+## Curriculum Upload & Management
+
+### Two Upload Methods
+
+**Method A — XLSX Upload**
+
+The teacher downloads a template XLSX file and fills it in:
+
+```
+Sheet: Grade_8
+| Subject     | Unit Name                  | Unit Code       | Objectives (pipe-separated)          | Has Lab | Lab Description              |
+|-------------|----------------------------|-----------------|--------------------------------------|---------|------------------------------|
+| Mathematics | Algebra – Linear Equations | MATH-LIN-001    | Solve linear equations|Graph lines   | No      |                              |
+| Science     | Measuring Density          | SCI-DEN-001     | Apply density formula|Use equipment  | Yes     | Measure density of solids    |
+```
+
+One sheet per grade (tab name = `Grade_5`, `Grade_6`, … `Grade_12`). Sheets for grades not being configured are left empty. The backend parses each sheet into the same JSON structure as the default curriculum files.
+
+**Method B — UI Form**
+
+The teacher uses a web form (Admin Dashboard, Phase 9+) to add subjects and units individually. Internally this produces the same JSON structure as Method A.
+
+### Upload Processing Flow
+
+```mermaid
+flowchart TD
+    A([Teacher uploads XLSX or submits form]) --> B[POST /curriculum/upload\nmultipart/form-data or JSON body]
+    B --> C{Validate structure:\nrequired columns present?\nno duplicate unit codes?}
+    C -->|invalid| D[HTTP 400 + validation errors\nlisted per row]
+    C -->|valid| E[Parse → curriculum JSON\ncurriculum_id = UUID\nstatus = draft]
+    E --> F[POST /curriculum/pipeline/trigger\ncurriculum_id]
+    F --> G[Pipeline Worker:\nbuild content for each unit × lang]
+    G -->|per unit| H[Write to Content Store\ncurricula/curriculum_id/unit_id/]
+    H --> I{All units done?}
+    I -->|yes| J[curriculum status = active\nteacher notified by email]
+    I -->|unit failed| K[Mark unit as failed\ncontinue pipeline\nteacher notified of failures]
+```
+
+### Curriculum Versioning
+
+A school can have multiple curricula per grade per year — `draft`, `active`, or `archived`. Only one curriculum per `(school_id, grade, year)` can be `active` at a time. Activating a new curriculum archives the previous one. Students mid-session complete their session against the curriculum they started with (same `content_version` mechanic).
+
+### Default Curriculum Per Year
+
+The operator seeds a default curriculum for each grade + year from the existing `data/grade*_stem.json` files. These are loaded at deploy time for each new year:
+
+```bash
+python pipeline/seed_default.py --year 2026 --grade 8 --lang en,fr,es
+```
+
+This creates a curriculum record with `id = default-2026-g8`, `school_id = null`, and runs the standard pipeline.
+
+### XLSX Template Columns
+
+| Column | Required | Notes |
+|---|---|---|
+| `Subject` | Yes | e.g. Mathematics, Science, Technology |
+| `Unit Name` | Yes | Human-readable unit title |
+| `Unit Code` | No | Auto-generated as `{SUBJECT_ABBR}-{SEQ}` if blank |
+| `Objectives` | Yes | Pipe-separated list; minimum 2 objectives |
+| `Has Lab` | No | `Yes` or `No`; default `No` |
+| `Lab Description` | If Has Lab = Yes | One-line description used in experiment prompt |
+
+---
+
+## Student–School Association
+
+### Enrolment Methods
+
+**Teacher-led (roster upload):**
+The teacher uploads a CSV or enters a list of student email addresses. These are stored as `pending` enrolment records. When a student with a matching email registers or logs in, their account is linked to the school automatically.
+
+**Student-led (school code):**
+Each school has a short `enrolment_code` (e.g. `SPHS-2026`). During registration, a student can optionally enter this code to join a school.
+
+### Association Rules
+
+- A student can be enrolled in **at most one school** at a time.
+- If a student's email appears in multiple schools' rosters, the first confirmed enrolment wins; subsequent ones require the student to explicitly switch.
+- Un-enrolled students (no school association) see the default curriculum for their grade and the current year.
+- When a student transfers schools, their progress history is retained; new sessions use the new school's curriculum.
+
+### Access Restriction
+
+A school can set `restrict_access = true` on a curriculum. When enabled:
+- Only enrolled students can access that curriculum.
+- Unenrolled students who somehow obtain a `unit_id` from the school's curriculum receive HTTP 403.
+- Unenrolled students fall back to the default curriculum automatically.
+
+---
+
+## Extended Analytics
+
+### Time-on-Topic
+
+Every lesson view and quiz attempt is timed at the backend. The mobile app sends start/end events; the backend records them even if the events arrive out of order (offline queue).
+
+**Lesson view lifecycle:**
+1. Student opens unit → `POST /analytics/lesson/start` → `{view_id}`
+2. Student leaves unit → `POST /analytics/lesson/end` → `{view_id, duration_s, audio_played, experiment_viewed}`
+
+**Quiz attempt lifecycle:**
+Already tracked via `POST /progress/session` / `POST /progress/session/end`. The `attempt_number` field is added (see Data Models).
+
+### Analytics Computed Metrics
+
+| Metric | Granularity | Use |
+|---|---|---|
+| Mean time-on-lesson | Per unit, per subject, per grade | Identify dense units |
+| Mean time-per-quiz-attempt | Per unit | Identify complex quizzes |
+| Mean attempts-to-pass | Per unit | Flag units needing remediation |
+| Pass rate (first attempt) | Per unit | Content quality signal |
+| Improvement trajectory | Per student × unit | Track learning gain across attempts |
+| Completion rate | Per student, per class | Engagement signal |
+| Audio play rate | Per lesson | TTS utility signal |
+
+### Teacher Analytics View
+
+`GET /analytics/school/{school_id}/class?grade=8&subject=Mathematics` returns aggregate metrics per unit for the teacher's class — useful for identifying which topics the whole class is struggling with.
+
+### Student Analytics View
+
+`GET /analytics/student/me` returns the student's own metrics: units attempted, best scores, time spent, attempt counts. Shown on the student's Progress screen.
+
+---
+
+## Student Feedback
+
+### Feedback Categories
+
+| Category | Trigger | Examples |
+|---|---|---|
+| `content` | Button on lesson or quiz screen | "Wrong answer in quiz", "Explanation is confusing" |
+| `ux` | Button in Settings or after quiz | "Text is too small", "Button doesn't work" |
+| `general` | Dedicated Feedback screen | "I wish there were more examples", "Love the audio!" |
+
+### Feedback Flow
+
+- A **"Give Feedback"** button is accessible from the lesson screen, the result screen, and the Settings screen.
+- The feedback form collects: category, optional `unit_id` (auto-filled on lesson/quiz screens), a free-text message (max 500 characters), and an optional rating (1–5 stars for content and UX categories).
+- Submitted via `POST /feedback`.
+- Feedback is stored in the `feedback` table and surfaced in the Admin Dashboard.
+- No student is required to provide feedback; it is always optional.
+- Rate-limited to 5 feedback submissions per student per hour to prevent spam.
 
 ---
 
@@ -611,6 +1216,59 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*` and `/subsc
 - Simple web dashboard (FastAPI + Jinja2 templates or React)
 
 **Milestone:** Operator can see which topics students struggle with most, which language content is missing, and trigger targeted content regeneration.
+
+---
+
+### Phase 8 — School & Teacher Registration + Curriculum Upload
+**Goal:** A school or teacher can register, upload their own STEM curriculum, and trigger content generation for it.
+
+- PostgreSQL schema: `schools`, `teachers`, `school_enrolments`, `curricula`, `curriculum_units`
+- `POST /schools/register` — school creates account; auto-approve in Phase 8
+- Teacher auth: separate JWT with `role` and `school_id`; reuse password reset + invite flow
+- XLSX template download: `GET /curriculum/template`
+- XLSX upload: `POST /curriculum/upload` — parse, validate, store as `curriculum_units` rows; return errors per row
+- UI form upload: same endpoint with JSON body
+- `POST /curriculum/pipeline/trigger` — kicks off content generation for a custom curriculum
+- Pipeline extended: accepts `curriculum_id` parameter; reads units from DB instead of local JSON file
+- Content Store path: `{curriculum_id}/{unit_id}/…` (same layout as default)
+- `GET /curriculum/pipeline/{job_id}/status` — polling endpoint for pipeline progress
+
+**Milestone:** A teacher can register, upload a Grade 8 STEM syllabus via XLSX, trigger generation, and receive an email when content is ready.
+
+---
+
+### Phase 9 — Student–School Association + Curriculum Routing
+**Goal:** Enrolled students see their school's curriculum; all others see the default.
+
+- `POST /schools/{school_id}/enrolment` — teacher uploads student email roster
+- Student registration: if email matches a `pending` enrolment record → auto-link to school; set `student.school_id`
+- Student registration: optional `enrolment_code` field for student-led join
+- Curriculum resolver middleware: on every `/content/*` request, resolve `curriculum_id` from (student.school_id, grade, year) or fall back to default
+- `restrict_access` enforcement: HTTP 403 if school curriculum has `restrict_access = true` and student is not enrolled
+- `PUT /curriculum/{curriculum_id}/activate` — activates curriculum, archives previous active one
+- Mobile: Settings screen shows enrolled school name; "Leave school" option
+
+**Milestone:** Enrolled students see their school's units. Unenrolled students see the default. A teacher can confirm which students have joined.
+
+---
+
+### Phase 10 — Extended Analytics + Student Feedback
+**Goal:** Detailed time-on-topic and attempt tracking; student feedback collected and visible to teachers and admins.
+
+- PostgreSQL schema: `lesson_views`, `feedback`
+- Add `attempt_number`, `curriculum_id`, `passed` to `sessions` table (Alembic migration)
+- `POST /analytics/lesson/start` and `POST /analytics/lesson/end` — record lesson view duration
+- `GET /analytics/student/me` — student's own metrics (scores, time, attempt counts, improvement)
+- `GET /analytics/school/{school_id}/class` — teacher's class aggregate per unit
+- `GET /analytics/unit/{unit_id}/summary` — platform-wide metrics (admin only)
+- Struggle flag: surface units where mean-attempts-to-pass > 2 or pass-rate < 50%
+- `POST /feedback` — rate-limited to 5/student/hour
+- `GET /admin/feedback` — paginated + filterable by category, unit, date
+- Mobile: "Give Feedback" button on lesson, result, and Settings screens
+- Mobile: Progress screen shows student's own analytics (time spent, attempts, scores)
+- Admin Dashboard: feedback review panel + analytics visualisations
+
+**Milestone:** A teacher can see which units their class is struggling with and how long students are spending. Students can report content issues. Admin can review and act on feedback.
 
 ---
 
