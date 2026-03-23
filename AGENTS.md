@@ -311,6 +311,10 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 37. **Refreshing all materialized views on every report request** — `REFRESH MATERIALIZED VIEW` takes a write lock and can take seconds on large tables. Only Celery Beat should trigger routine refreshes (nightly). The on-demand refresh endpoint (`POST /reports/.../refresh`) must be rate-limited (once per 30 minutes per school) and dispatched as a Celery task, never awaited synchronously.
 38. **Not showing the "last updated" timestamp on reports** — materialized views are stale by design (up to 24 hours). Without a visible timestamp, teachers may act on yesterday's data thinking it is current. Always include `data_as_of: ISO8601` in every report response body.
 39. **Sending weekly digest emails in a single synchronous loop** — the digest task may need to send to hundreds of teachers. Dispatch one Celery sub-task per recipient (`send_digest_email.apply_async(args=[teacher_id])`). Never block the Beat task waiting for email delivery.
+45. **Calling `log.info()` directly for business events instead of `emit_event()`** — scattered log calls produce inconsistent field names across components, breaking Grafana queries and alert rules that depend on specific label values. All business events must go through `core/events.py emit_event()`; this is the single call point that writes the structured log entry AND increments the Prometheus counter.
+46. **Exposing `GET /metrics` publicly** — the Prometheus metrics endpoint reveals internal state (queue depths, auth failure rates, DB pool usage) that aids an attacker. Block it at nginx with an `allow <prometheus_ip>; deny all;` directive, and require `METRICS_TOKEN` bearer auth as a second layer. Never forward it through the public load balancer.
+47. **Writing audit_log entries synchronously in the request path** — `write_audit_log()` performs a DB insert. Run it as a fire-and-forget Celery task to avoid adding DB write latency to the response. The audit event does not need to be visible before the API returns 200.
+48. **Not attaching `correlation_id` to Sentry events** — Sentry issues are hard to correlate with log entries without a shared ID. Set `sentry_sdk.set_tag("correlation_id", current_correlation_id.get())` in the request middleware so every captured exception carries the same ID as the log stream.
 42. **Fetching Auth0 JWKS on every token exchange request** — the JWKS endpoint is a remote HTTP call. Cache the key set in L1 TTLCache with a 24-hour TTL; refresh only on `kid` mismatch (unknown key ID). Never hit the JWKS endpoint inline on the student login hot path.
 43. **Using the external Auth0 `id_token` directly on content or progress endpoints** — the `id_token` does not contain `grade`, `locale`, `school_id`, or `account_status`. Always complete the token exchange first and use the internal JWT for all subsequent requests. Middleware that accepts raw Auth0 tokens on non-exchange endpoints is a security gap.
 44. **Checking `account_status` in PostgreSQL inside the auth middleware** — this adds a DB query to every authenticated request. Store suspension state in a Redis set (`suspended:{id}`, TTL = JWT lifetime). The middleware reads only from Redis after signature verification; PostgreSQL is never queried on the hot path for status checks.
@@ -342,7 +346,11 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] `PATCH /student/profile` endpoint
 - [ ] `DELETE /auth/account` endpoint (queues GDPR erasure + Auth0 user deletion)
 - [ ] Mobile: Auth0 SDK integration; exchange → store internal JWT securely; locale from JWT
-- [ ] Sentry SDK initialised in backend and mobile
+- [ ] `core/observability.py`: Prometheus metric objects, HTTP middleware, `GET /metrics` endpoint (token-protected), `GET /health` deep check
+- [ ] `core/events.py`: `emit_event(category, event_type, **ctx)` — structured log + metric counter; `write_audit_log()` — async Celery dispatch
+- [ ] Correlation ID middleware: UUID injected per request into `contextvars.ContextVar`; returned as `X-Correlation-Id` header
+- [ ] `audit_log` PostgreSQL table created via Alembic migration
+- [ ] Sentry SDK initialised in backend and mobile; `before_send` strips PII; `correlation_id` tag set in middleware
 - [ ] CORS policy configured via `ALLOWED_ORIGINS` env var
 - [ ] HTTPS enforced; HTTP → HTTPS redirect configured
 - [ ] asyncpg connection pool initialised in FastAPI lifespan context
@@ -370,6 +378,13 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] Mobile: `SubscriptionScreen` stub (no real payment)
 - [ ] Structured log aggregation platform configured (CloudWatch / ELK / Loki)
 - [ ] Uptime monitoring on `/health` (external ping, 60-second interval)
+- [ ] Prometheus + Alertmanager deployed; `GET /metrics` scraped by Prometheus (token-protected)
+- [ ] Alertmanager rules file (`docs/prometheus/alerts.yml`) deployed with critical/high/medium groups
+- [ ] Notification channels configured: PagerDuty (critical), Slack `#studybuddy-alerts` (high/medium), SES email (pipeline/payments)
+- [ ] Grafana provisioned with six dashboards (Platform Overview, Content & Cache, Student Activity, Backend Health, Security, SLO Burn Rate)
+- [ ] Pipeline emits metrics to Prometheus Pushgateway on completion
+- [ ] DB pool state + Celery queue depth metrics polled by Celery Beat every 30 s
+- [ ] nginx `allow <prometheus_ip>; deny all;` for `/metrics` location block
 - [ ] Redis L2 cache: entitlement and curriculum resolver with 300s TTL
 - [ ] In-process L1 cache (cachetools TTLCache) for curriculum tree and JWT keys
 - [ ] nginx configured: TLS, rate limiting, gzip, keep-alive upstream

@@ -106,6 +106,20 @@ Tracks all decisions, design changes, and implementation milestones.
   (event loop blocking, audio proxying, connection pool sizing, CDN invalidation, Redis
   AOF persistence); added Performance conventions section; updated Phase 1/2/4 checklists
 
+### Observability Stack — Grafana Hooks, Notifications, Event Logging (this session)
+- ARCHITECTURE.md: replaced thin Observability section with full stack design — 8 subsections:
+  observability stack diagram, Prometheus metrics (HTTP auto + 15 custom business/infra metrics),
+  Grafana dashboard reference (6 dashboards), Alertmanager rules YAML (critical/high/medium groups),
+  notification routing (PagerDuty/Slack/SES), structured event logging system (8 categories,
+  emit_event() API, correlation ID pattern), audit_log table schema with 9 event types,
+  Sentry integration with Slack integration
+- BACKEND_ARCHITECTURE.md: expanded Technology Stack table with prometheus_client,
+  prometheus-fastapi-instrumentator, Alertmanager, Grafana, OpenTelemetry, events.py, audit_log
+- REQUIREMENTS.md: replaced NFR-OBS (13 items) with 22 detailed requirements (NFR-OBS-001 to 022)
+- AGENTS.md: added pitfalls 45–48 (emit_event() discipline, /metrics exposure, audit_log async,
+  Sentry correlation_id); expanded Phase 1 checklist (observability.py, events.py, correlation ID,
+  audit_log table, Sentry); expanded Phase 2 checklist (Prometheus, Alertmanager, Grafana, nginx)
+
 ### Authentication Architecture + Account Management (this session)
 - ARCHITECTURE.md: added "Authentication Architecture" section — two-track auth diagram,
   token exchange sequence diagram, account status lifecycle state diagram; updated Auth

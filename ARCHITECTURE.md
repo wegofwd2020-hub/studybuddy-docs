@@ -1257,72 +1257,384 @@ The backend never stores card numbers, CVV, or bank account details. Stripe hand
 
 ## Observability & Monitoring
 
-### Structured Logging
+The backend exposes three complementary observability layers: **metrics** (Prometheus/Grafana), **structured event logs** (JSON to log aggregation), and **error notifications** (Sentry + Alertmanager). These are implemented in two dedicated modules:
 
-All backend components use structured JSON logging. Log entries include:
-```json
-{"timestamp": "ISO8601", "level": "INFO", "component": "content", "student_id": "uuid", "unit_id": "G8-MATH-001", "action": "lesson_served", "locale": "fr", "duration_ms": 45}
+- `backend/src/core/observability.py` — Prometheus metric objects, HTTP middleware, `GET /metrics` endpoint, `GET /health` endpoint
+- `backend/src/core/events.py` — structured event emitter, audit log writer, correlation ID context
+
+### Observability Stack Architecture
+
+```mermaid
+flowchart LR
+    API["FastAPI\nBackend"]
+    CEL["Celery\nWorkers"]
+    MOB["Mobile\nApp"]
+
+    API -->|"stdout JSON logs"| LOG["Log Aggregator\n(Loki / CloudWatch / ELK)"]
+    CEL -->|"stdout JSON logs"| LOG
+    API -->|"GET /metrics\n(Prometheus scrape)"| PROM["Prometheus"]
+    CEL -->|"Pushgateway\n(job metrics)"| PROM
+    PROM --> GRAF["Grafana\nDashboards"]
+    PROM --> AM["Alertmanager"]
+    AM -->|"critical"| PD["PagerDuty"]
+    AM -->|"high / medium"| SL["Slack\n#studybuddy-alerts"]
+    AM -->|"pipeline / payments"| EM["Email\n(SES)"]
+    API -->|"unhandled exceptions"| SEN["Sentry"]
+    MOB -->|"crash reports"| SEN
+    LOG --> GRAF
+    SEN --> SL
 ```
-Never log passwords, JWT tokens, Stripe keys, or raw payment data. Backend logs go to stdout, captured by the container runtime and forwarded to a log aggregation platform (CloudWatch, ELK, Loki, or equivalent).
 
-### Error Tracking
+---
 
-Integrate Sentry in both the backend and mobile app:
-- Backend: `sentry-sdk[fastapi]` captures unhandled exceptions with request context (endpoint, student_id if authenticated).
-- Mobile: `sentry-sdk` captures unhandled exceptions and offline queues crash reports for upload on next launch.
-- Strip PII from Sentry events before transmission.
+### 1. Prometheus Metrics
 
-### Health Check
+**Package:** `prometheus-fastapi-instrumentator` (auto HTTP metrics) + `prometheus_client` (custom metrics).
 
-`GET /health` is a deep health check that reports the status of every dependency:
+**`GET /metrics`** — Prometheus scrape endpoint. Protected: requires `Authorization: Bearer $METRICS_TOKEN` (env var). Never exposed publicly; nginx blocks it at the edge unless request originates from the Prometheus internal network.
+
+#### HTTP Metrics (auto-instrumented)
+
+| Metric | Type | Labels |
+|---|---|---|
+| `http_requests_total` | counter | `method`, `endpoint`, `status_code` |
+| `http_request_duration_seconds` | histogram | `method`, `endpoint` |
+
+Histogram buckets: `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]`
+
+#### Business Metrics (custom — `backend/src/core/observability.py`)
+
+| Metric | Type | Labels | Purpose |
+|---|---|---|---|
+| `sb_auth_exchange_total` | counter | `outcome` (success/failure) | Auth0 token exchange success rate |
+| `sb_auth_failures_total` | counter | `reason` (invalid_token/suspended/lockout) | Security anomaly detection |
+| `sb_content_requests_total` | counter | `content_type`, `cache_layer`, `locale` | Content serving volume |
+| `sb_cache_hits_total` | counter | `layer` (L1/L2) | Cache effectiveness |
+| `sb_cache_misses_total` | counter | `layer` (L1/L2) | Cache miss rate |
+| `sb_entitlement_checks_total` | counter | `result` (allowed/paywall/forbidden) | Freemium conversion funnel |
+| `sb_quiz_sessions_total` | counter | `grade`, `subject` | Learning activity volume |
+| `sb_quiz_answers_total` | counter | `correct` (true/false) | Pass/fail trends |
+| `sb_subscription_events_total` | counter | `event_type`, `outcome` | Payment health |
+| `sb_pipeline_units_total` | counter | `grade`, `lang`, `status` (built/skipped/failed) | Pipeline quality |
+| `sb_pipeline_duration_seconds` | histogram | `grade`, `lang` | Pipeline performance |
+| `sb_pipeline_cost_usd` | histogram | `grade` | Spend tracking |
+| `sb_active_students_gauge` | gauge | — | Platform size (updated nightly by Celery Beat) |
+| `sb_account_status_changes_total` | counter | `user_type`, `new_status` | Account health |
+| `sb_rate_limit_hits_total` | counter | `endpoint` | Abuse detection |
+
+#### Infrastructure Metrics
+
+| Metric | Type | Labels | Source |
+|---|---|---|---|
+| `sb_db_pool_connections` | gauge | `state` (busy/idle/waiting) | asyncpg pool stats; polled by middleware |
+| `sb_redis_memory_bytes` | gauge | — | Redis `INFO memory` polled by Celery Beat |
+| `sb_redis_evicted_keys_total` | counter | — | Redis `INFO stats` delta; polled by Celery Beat |
+| `sb_celery_queue_depth` | gauge | `queue` (pipeline/io/default) | Redis LLEN; polled every 30 s by Celery Beat |
+
+---
+
+### 2. Grafana Dashboards
+
+Six recommended dashboards. Import via JSON or provision from `docs/grafana/` directory.
+
+| Dashboard | Key Panels | Primary Alert Surface |
+|---|---|---|
+| **Platform Overview** | Request rate, error rate, p95 latency, active students, subscription count, new registrations | Error rate, latency SLO breaches |
+| **Content & Cache** | Cache hit ratio by layer, content requests by type/locale, audio plays, CDN hit rate | Cache hit ratio drop, content errors |
+| **Student Activity** | Quiz sessions/hour, pass rate trend, top-10 struggling units, free-to-paid funnel (402-rate) | Pass rate drop, paywall hit spike |
+| **Backend Health** | DB pool state, Redis memory/eviction, Celery queue depth, circuit breaker open/closed state | Pool exhaustion, queue backlog, circuit open |
+| **Security** | Auth exchange failures, rate-limit hits/min, suspended account access attempts, token errors | Auth failure spike, rate-limit surge |
+| **SLO Burn Rate** | p50/p95/p99 per endpoint vs. SLO target (traffic-light status), error budget remaining | Any SLO breach |
+
+---
+
+### 3. Alertmanager Rules
+
+Alert definitions live in `docs/prometheus/alerts.yml`. Notifications route to different channels by severity.
+
+```yaml
+groups:
+  - name: studybuddy.critical
+    rules:
+      - alert: BackendDown
+        expr: up{job="studybuddy-api"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "API server unreachable" }
+
+      - alert: DatabaseUnreachable
+        expr: sb_db_pool_connections{state="waiting"} > 5
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "DB pool exhausted — all workers waiting for connections" }
+
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "Redis unreachable — sessions and cache unavailable" }
+
+  - name: studybuddy.high
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          rate(http_requests_total{status_code=~"5.."}[5m])
+          / rate(http_requests_total[5m]) > 0.01
+        for: 5m
+        labels: { severity: high }
+
+      - alert: ContentLatencySLOBreach
+        expr: |
+          histogram_quantile(0.95,
+            rate(http_request_duration_seconds_bucket
+              {endpoint=~"/content/.*"}[5m])) > 0.2
+        for: 5m
+        labels: { severity: high }
+
+      - alert: AuthExchangeFailureSpike
+        expr: rate(sb_auth_exchange_total{outcome="failure"}[5m]) > 5
+        for: 5m
+        labels: { severity: high }
+
+      - alert: StripeWebhookErrors
+        expr: rate(sb_subscription_events_total{outcome="error"}[15m]) > 0
+        for: 5m
+        labels: { severity: high }
+
+      - alert: CeleryPipelineBacklog
+        expr: sb_celery_queue_depth{queue="pipeline"} > 50
+        for: 10m
+        labels: { severity: high }
+
+  - name: studybuddy.medium
+    rules:
+      - alert: RateLimitSurge
+        expr: rate(sb_rate_limit_hits_total[5m]) > 50
+        for: 5m
+        labels: { severity: medium }
+
+      - alert: RedisEvictionSpike
+        expr: rate(sb_redis_evicted_keys_total[5m]) > 100
+        for: 5m
+        labels: { severity: medium }
+
+      - alert: PipelineUnitFailures
+        expr: increase(sb_pipeline_units_total{status="failed"}[1h]) > 5
+        for: 1m
+        labels: { severity: medium }
+
+      - alert: CDNCacheHitRateLow
+        expr: cloudfront_cache_hit_rate < 0.80
+        for: 15m
+        labels: { severity: medium }
+```
+
+**Alertmanager routing (`docs/prometheus/alertmanager.yml`):**
+
+```yaml
+route:
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: slack-default
+  routes:
+    - match: { severity: critical }
+      receiver: pagerduty
+      continue: true          # also send to Slack
+    - match: { severity: critical }
+      receiver: slack-critical
+    - match: { severity: high }
+      receiver: slack-alerts
+    - match: { alertname: StripeWebhookErrors }
+      receiver: email-payments
+    - match: { alertname: PipelineUnitFailures }
+      receiver: email-pipeline
+
+receivers:
+  - name: pagerduty
+    pagerduty_configs:
+      - routing_key: $PAGERDUTY_KEY
+  - name: slack-critical
+    slack_configs:
+      - api_url: $SLACK_WEBHOOK_CRITICAL
+        channel: "#studybuddy-incidents"
+  - name: slack-alerts
+    slack_configs:
+      - api_url: $SLACK_WEBHOOK_ALERTS
+        channel: "#studybuddy-alerts"
+  - name: email-payments
+    email_configs:
+      - to: payments-team@example.com
+  - name: email-pipeline
+    email_configs:
+      - to: content-team@example.com
+```
+
+---
+
+### 4. Structured Event Logging
+
+Every action that matters is logged as a structured JSON event. The logger is initialised once per component and emits to stdout (captured by container runtime → log aggregation).
+
+#### Correlation ID
+
+Every inbound HTTP request is assigned a `correlation_id` (UUID) by a FastAPI middleware, stored in a Python `contextvars.ContextVar`. All log entries within the same request automatically include it. Error responses return `X-Correlation-Id` header so users can report it to support.
+
+#### Log Entry Format
+
+```json
+{
+  "timestamp": "2026-03-23T14:30:00.123Z",
+  "level": "INFO",
+  "event_category": "content",
+  "event_type": "lesson_served",
+  "correlation_id": "a1b2c3d4-...",
+  "student_id": "uuid",
+  "unit_id": "G8-MATH-001",
+  "locale": "en",
+  "cache_layer": "L2",
+  "duration_ms": 23,
+  "component": "content"
+}
+```
+
+Never log: passwords, JWT tokens, Stripe secret keys, Auth0 secrets, raw payment data, or full PII beyond `student_id`.
+
+#### Event Categories and Types
+
+| Category | Event Types | Emitted by |
+|---|---|---|
+| `auth` | `exchange_success`, `exchange_failure`, `token_refresh`, `forgot_password_triggered`, `account_locked`, `account_suspended_access` | auth service, middleware |
+| `content` | `lesson_served`, `quiz_served`, `audio_url_issued`, `cache_hit`, `cache_miss`, `content_not_found` | content service |
+| `progress` | `session_open`, `session_end`, `answer_recorded`, `sync_flush_start`, `sync_flush_complete` | progress service |
+| `subscription` | `checkout_created`, `payment_succeeded`, `payment_failed`, `subscription_cancelled`, `grace_period_started`, `entitlement_granted`, `entitlement_revoked` | subscription service |
+| `pipeline` | `build_started`, `unit_generated`, `unit_skipped`, `unit_failed`, `build_complete`, `spend_cap_abort` | pipeline |
+| `security` | `rate_limit_hit`, `invalid_token`, `suspended_account_access`, `brute_force_detected`, `account_lockout` | auth middleware |
+| `admin` | `account_status_changed`, `curriculum_activated`, `admin_login`, `gdpr_deletion_scheduled` | admin service |
+| `system` | `startup`, `shutdown`, `health_check_failed`, `db_pool_exhausted`, `redis_eviction_spike`, `circuit_breaker_open` | core |
+
+#### Event Logger Usage
+
+```python
+# backend/src/core/events.py
+from src.core.events import emit_event, write_audit_log
+
+# In content service
+await emit_event(
+    category="content",
+    event_type="lesson_served",
+    student_id=student_id,
+    unit_id=unit_id,
+    locale=locale,
+    cache_layer="L2",
+    duration_ms=elapsed_ms
+)
+
+# In admin service — security-critical actions also write to audit_log table
+await write_audit_log(
+    event_type="account_status_changed",
+    actor_type="product_admin",
+    actor_id=admin_id,
+    target_type="student",
+    target_id=student_id,
+    metadata={"old_status": "active", "new_status": "suspended"},
+    ip_address=request.client.host
+)
+```
+
+`emit_event` writes a structured log entry **and** increments the relevant Prometheus counter (e.g., `sb_account_status_changes_total`). This is the single call point — no separate log + metric calls in service code.
+
+---
+
+### 5. Audit Log
+
+Security-critical events are persisted to a tamper-resistant PostgreSQL table in addition to the structured log stream.
+
+```sql
+CREATE TABLE audit_log (
+    id             bigserial     PRIMARY KEY,
+    timestamp      timestamptz   NOT NULL DEFAULT NOW(),
+    event_type     text          NOT NULL,
+    actor_type     text          NOT NULL,  -- 'product_admin' | 'super_admin' | 'system' | 'student'
+    actor_id       uuid,
+    target_type    text,                    -- 'student' | 'teacher' | 'school' | 'curriculum'
+    target_id      uuid,
+    metadata       jsonb,
+    ip_address     inet,
+    correlation_id text
+);
+
+CREATE INDEX ix_audit_log_timestamp   ON audit_log (timestamp DESC);
+CREATE INDEX ix_audit_log_target      ON audit_log (target_type, target_id);
+CREATE INDEX ix_audit_log_actor       ON audit_log (actor_type, actor_id);
+```
+
+Events written to `audit_log`:
+
+| Event | When |
+|---|---|
+| `account_status_changed` | Any suspension, reactivation, or deletion |
+| `gdpr_deletion_scheduled` | `DELETE /auth/account` or admin delete |
+| `admin_login` | Successful admin auth |
+| `admin_login_failed` | Failed admin auth attempt |
+| `admin_password_reset` | Admin reset-password flow completed |
+| `curriculum_activated` | School curriculum goes live |
+| `school_registration_approved` | New school approved |
+| `subscription_plan_changed` | Admin-forced plan change (not Stripe-driven) |
+| `rate_limit_exceeded` | IP/student hits rate limit threshold |
+
+Audit log rows are never deleted. PII in `metadata` is anonymised when the associated account is deleted under GDPR.
+
+---
+
+### 6. Error Notifications (Sentry)
+
+Sentry handles unhandled exceptions and provides issue grouping, assignment, and alert rules.
+
+**Backend:** `sentry-sdk[fastapi]` — captures all unhandled exceptions with request context (`endpoint`, `student_id` if authenticated, `correlation_id`). PII is stripped before transmission via Sentry's `before_send` hook.
+
+**Mobile:** `sentry-sdk` — crashes are queued locally and uploaded on next network-connected launch.
+
+**Sentry alert rules (configure in Sentry project settings):**
+- New issue first seen → notify `#studybuddy-alerts` Slack
+- Issue regression (resolved, then seen again) → notify `#studybuddy-alerts`
+- Issue frequency > 10 events in 5 minutes → notify `#studybuddy-incidents` + email on-call
+
+**Integration with Alertmanager:** Sentry Slack notifications go to the same `#studybuddy-alerts` channel as Prometheus alerts, giving a single pane of view for both infrastructure and application errors.
+
+---
+
+### 7. Health Check
+
+`GET /health` — deep check; used as Kubernetes/ECS readiness probe and external uptime monitor.
 
 ```json
 {
   "status": "ok",
+  "version": "1.0.0",
   "checks": {
-    "db": "ok",
-    "redis": "ok",
-    "content_store": "ok"
+    "db":            { "status": "ok",   "latency_ms": 3 },
+    "redis":         { "status": "ok",   "latency_ms": 1 },
+    "content_store": { "status": "ok",   "latency_ms": 12 },
+    "auth0_jwks":    { "status": "ok",   "cached": true }
   },
-  "version": "0.2.0"
+  "timestamp": "2026-03-23T14:30:00Z"
 }
 ```
 
-If any check fails, the endpoint returns HTTP 503. Use this as the readiness probe in container orchestration.
+Returns HTTP 503 if any check fails. The failing check's `status` field is `"error"` with an `error` key containing a safe (non-sensitive) description.
 
-### Metrics
+---
 
-Expose a `/metrics` endpoint (Prometheus format) or push to Datadog/CloudWatch. Key metrics:
+### 8. Pipeline Run Report
 
-| Metric | Type | Labels |
-|---|---|---|
-| `http_request_duration_seconds` | histogram | endpoint, method, status |
-| `content_cache_hits_total` | counter | layer (redis/disk) |
-| `entitlement_checks_total` | counter | result (allowed/402) |
-| `pipeline_units_built_total` | counter | grade, lang, status |
-| `stripe_webhook_events_total` | counter | event_type, outcome |
-| `progress_events_queued` (mobile) | gauge | — |
+On completion, `build_grade.py` emits a structured JSON summary to stdout (captured by log aggregation) **and** writes metrics to Prometheus Pushgateway:
 
-### Alerting
-
-| Alert | Condition | Severity |
-|---|---|---|
-| Backend down | `/health` fails 3 consecutive checks (60-second intervals) | Critical |
-| Error rate spike | 5xx rate > 1% of requests over 5 minutes | High |
-| Pipeline failure | Pipeline run exits non-zero | High |
-| Stripe webhook drop | Webhook delivery rate < 95% in 30 minutes | High |
-| Content staleness | `meta.json` `generated_at` is older than curriculum JSON `mtime` by > 7 days | Medium |
-| Redis eviction spike | `evicted_keys` rate > 100/min | Medium |
-
-### Performance Targets
-
-Performance targets (SLOs) are defined in [BACKEND_ARCHITECTURE.md](BACKEND_ARCHITECTURE.md#performance-targets-slos).
-
-### Pipeline Run Report
-
-On completion, `build_grade.py` emits a JSON summary:
 ```json
 {
+  "event_category": "pipeline",
+  "event_type": "build_complete",
   "grade": 8,
   "langs": ["en", "fr", "es"],
   "total_units": 40,
@@ -1331,9 +1643,16 @@ On completion, `build_grade.py` emits a JSON summary:
   "failed": 0,
   "tokens_used": 185000,
   "estimated_cost_usd": 1.85,
-  "duration_s": 1240
+  "duration_s": 1240,
+  "correlation_id": "uuid"
 }
 ```
+
+If `failed > 0`, a Celery task fires an email to the content team via SES (configurable recipient: `PIPELINE_ALERT_EMAIL` env var).
+
+### Performance Targets
+
+Performance targets (SLOs) are defined in [BACKEND_ARCHITECTURE.md](BACKEND_ARCHITECTURE.md#performance-targets-slos).
 
 ---
 

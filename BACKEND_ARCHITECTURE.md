@@ -950,8 +950,13 @@ Uptime target: **99.9%** (≤ 8.7 hours downtime per year).
 | Circuit breaker | `circuitbreaker` library | Wrap all external API calls |
 | Migrations | Alembic | Schema versioning; automated apply on deploy |
 | Content delivery | S3 + CloudFront | Pre-signed URLs; global CDN; no API server bandwidth |
-| Monitoring | Prometheus + Grafana (or Datadog) | Request metrics, cache hit rates, queue depths |
-| Error tracking | Sentry | Unhandled exceptions with request context |
+| Metrics | `prometheus_client` + `prometheus-fastapi-instrumentator` | Auto HTTP metrics + custom business/infra metrics; `GET /metrics` scrape endpoint |
+| Alerting | Prometheus Alertmanager | Alert rules in `docs/prometheus/alerts.yml`; routes to PagerDuty / Slack / SES |
+| Dashboards | Grafana | Six dashboards (Platform Overview, Content & Cache, Student Activity, Backend Health, Security, SLO Burn Rate) |
+| Distributed tracing | OpenTelemetry SDK + `opentelemetry-instrumentation-fastapi` | Request traces with span context; correlation ID propagation |
+| Error tracking | Sentry (`sentry-sdk[fastapi]`) | Unhandled exceptions with `correlation_id` attached; PII stripped via `before_send` |
+| Event logging | `core/events.py` — `emit_event()` | Structured JSON events + Prometheus counter increment in one call |
+| Audit log | PostgreSQL `audit_log` table | Tamper-resistant record of security-critical actions |
 | Deployment | Docker + Docker Compose (dev) / ECS or K8s (prod) | Reproducible; horizontal scaling |
 
 ---

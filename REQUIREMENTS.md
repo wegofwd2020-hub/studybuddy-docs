@@ -401,19 +401,28 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| NFR-OBS-001 | Structured JSON logs from backend (stdout) aggregated to a log platform (CloudWatch / ELK / Loki) | P1 | 1 | proposed |
-| NFR-OBS-002 | Error tracking via Sentry (backend + mobile) | P1 | 1 | proposed |
-| NFR-OBS-003 | Request metrics exported: request count, latency (p50/p95/p99), error rate by endpoint | P1 | 2 | proposed |
-| NFR-OBS-004 | Redis cache hit/miss rate monitored | P2 | 2 | proposed |
-| NFR-OBS-005 | Pipeline run report emitted on completion: units attempted, succeeded, failed, tokens used, cost estimate | P1 | 2 | proposed |
-| NFR-OBS-006 | Alert when pipeline run fails (email or Slack webhook) | P1 | 2 | proposed |
-| NFR-OBS-007 | Alert when Stripe webhook returns non-200 or delivery rate drops | P1 | 5 | proposed |
-| NFR-OBS-008 | Alert when content freshness check fails (curriculum updated but content not regenerated) | P1 | 4 | proposed |
-| NFR-OBS-009 | Dashboard: 402-rate trend (free-to-paywall conversion funnel) | P2 | 5 | proposed |
-| NFR-OBS-010 | Mobile crash reports via Sentry or equivalent | P1 | 2 | proposed |
-| NFR-OBS-011 | Uptime monitoring: external ping on `/health` every 60 seconds | P1 | 1 | proposed |
-| NFR-OBS-012 | Celery queue depth monitored; alert when pipeline queue depth > 10 for > 5 minutes | P1 | 2 | proposed |
-| NFR-OBS-013 | CDN cache hit rate monitored via CloudFront metrics; alert if hit rate drops below 80% | P2 | 4 | proposed |
+| NFR-OBS-001 | All backend log entries are structured JSON (stdout); aggregated to Loki / CloudWatch / ELK | P0 | 1 | proposed |
+| NFR-OBS-002 | Every log entry carries `correlation_id` (UUID per request), `event_category`, `event_type`, `component` | P0 | 1 | proposed |
+| NFR-OBS-003 | `correlation_id` injected by FastAPI middleware; stored in `contextvars.ContextVar`; returned as `X-Correlation-Id` response header | P1 | 1 | proposed |
+| NFR-OBS-004 | All event emissions use `emit_event(category, event_type, **ctx)` from `core/events.py`; no ad-hoc `log.info()` calls for business events | P1 | 1 | proposed |
+| NFR-OBS-005 | `GET /metrics` endpoint in Prometheus exposition format; protected by `METRICS_TOKEN` bearer token; blocked by nginx for external requests | P0 | 2 | proposed |
+| NFR-OBS-006 | HTTP metrics auto-instrumented via `prometheus-fastapi-instrumentator`: `http_requests_total`, `http_request_duration_seconds` | P0 | 2 | proposed |
+| NFR-OBS-007 | All custom business metrics defined in `core/observability.py` (see ARCHITECTURE.md Metrics table); no metric definitions scattered across service files | P1 | 2 | proposed |
+| NFR-OBS-008 | Grafana provisioned with six dashboards (Platform Overview, Content & Cache, Student Activity, Backend Health, Security, SLO Burn Rate) | P1 | 2 | proposed |
+| NFR-OBS-009 | Alertmanager configured with rules file `docs/prometheus/alerts.yml`; routes critical→PagerDuty, high→Slack `#studybuddy-alerts`, payments→email, pipeline→email | P0 | 2 | proposed |
+| NFR-OBS-010 | Sentry integrated in backend (`sentry-sdk[fastapi]`) and mobile; PII stripped via `before_send`; `correlation_id` attached to every Sentry event | P0 | 1 | proposed |
+| NFR-OBS-011 | Sentry alert rules: new issue → Slack, regression → Slack, >10 events/5 min → Slack `#studybuddy-incidents` + email on-call | P1 | 1 | proposed |
+| NFR-OBS-012 | Security-critical events (account status changes, GDPR deletions, admin logins, rate-limit exceeded) written to `audit_log` table in PostgreSQL in addition to the log stream | P0 | 1 | proposed |
+| NFR-OBS-013 | `audit_log` rows are never deleted; PII in `metadata` is anonymised on GDPR schedule when account is deleted | P0 | 5 | proposed |
+| NFR-OBS-014 | `GET /health` deep check covers DB, Redis, Content Store, Auth0 JWKS cache; returns 503 on any failure; used as ECS/K8s readiness probe | P0 | 1 | proposed |
+| NFR-OBS-015 | Uptime monitor pings `/health` every 60 seconds from an external location; alert on 3 consecutive failures | P0 | 1 | proposed |
+| NFR-OBS-016 | Celery queue depth (`sb_celery_queue_depth`) polled every 30 s; alert when `pipeline` queue > 50 for > 10 min | P1 | 2 | proposed |
+| NFR-OBS-017 | DB pool state (`sb_db_pool_connections`) polled by middleware; alert when `waiting > 5` for > 2 min | P1 | 2 | proposed |
+| NFR-OBS-018 | Redis eviction rate monitored; alert when > 100 keys/min evicted (indicates memory pressure) | P1 | 2 | proposed |
+| NFR-OBS-019 | Pipeline run report emitted as structured event on completion; if `failed > 0`, email sent to `PIPELINE_ALERT_EMAIL` via Celery + SES | P1 | 2 | proposed |
+| NFR-OBS-020 | CDN cache hit rate monitored via CloudFront metrics; alert if rate drops below 80% | P2 | 4 | proposed |
+| NFR-OBS-021 | Mobile crash reports uploaded to Sentry on next network-connected launch; offline queue capped at 50 events | P1 | 2 | proposed |
+| NFR-OBS-022 | SLO burn rate dashboard; engineering team reviews weekly; p95 breach fires `ContentLatencySLOBreach` alert | P1 | 2 | proposed |
 
 ---
 
