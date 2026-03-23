@@ -309,11 +309,13 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| NFR-PERF-001 | Content endpoint p95 latency ≤ 200 ms for cached responses (Redis hit) | P1 | 2 | proposed |
-| NFR-PERF-002 | Content endpoint p95 latency ≤ 500 ms for disk/S3 reads (cache miss) | P1 | 2 | proposed |
-| NFR-PERF-003 | Auth endpoints (login/register) respond within 1 s including bcrypt | P1 | 1 | proposed |
+| NFR-PERF-001 | Content endpoint (cache hit) p95 ≤ 50 ms | P1 | 2 | proposed |
+| NFR-PERF-002 | Content endpoint (cache miss / S3 read) p95 ≤ 200 ms | P1 | 2 | proposed |
+| NFR-PERF-003 | Auth endpoints (login/register) p95 ≤ 500 ms (bcrypt-bound) | P1 | 1 | proposed |
 | NFR-PERF-004 | Mobile app: cached content renders in < 100 ms (no network) | P1 | 2 | proposed |
 | NFR-PERF-005 | Pipeline throughput: generate one complete grade (all units, one language) within 60 minutes | P2 | 2 | proposed |
+| NFR-PERF-006 | Progress write endpoints (`POST /progress/answer`) p95 ≤ 20 ms (fire-and-forget pattern) | P1 | 3 | proposed |
+| NFR-PERF-007 | API server availability: 99.9% uptime (≤ 8.7 hours downtime per year) | P0 | 2 | proposed |
 
 ---
 
@@ -330,6 +332,9 @@
 | NFR-REL-007 | Backend health endpoint reports DB, Redis, and Content Store reachability | P1 | 1 | proposed |
 | NFR-REL-008 | Mobile: all network calls run in daemon threads; UI never blocked by network | P0 | 1 | accepted |
 | NFR-REL-009 | Deployment: zero-downtime rolling deploys (containerised backend) | P1 | 2 | proposed |
+| NFR-REL-010 | PgBouncer deployed in transaction-pooling mode in front of PostgreSQL to prevent connection exhaustion | P0 | 1 | proposed |
+| NFR-REL-011 | Circuit breakers wrap all external API calls (Stripe, Anthropic, TTS, SES); failure threshold 5 for Stripe, 3 for Anthropic | P1 | 2 | proposed |
+| NFR-REL-012 | FastAPI event loop must never be blocked; all CPU-bound operations (bcrypt) run in thread pool executor | P0 | 1 | proposed |
 
 ---
 
@@ -348,6 +353,8 @@
 | NFR-OBS-009 | Dashboard: 402-rate trend (free-to-paywall conversion funnel) | P2 | 5 | proposed |
 | NFR-OBS-010 | Mobile crash reports via Sentry or equivalent | P1 | 2 | proposed |
 | NFR-OBS-011 | Uptime monitoring: external ping on `/health` every 60 seconds | P1 | 1 | proposed |
+| NFR-OBS-012 | Celery queue depth monitored; alert when pipeline queue depth > 10 for > 5 minutes | P1 | 2 | proposed |
+| NFR-OBS-013 | CDN cache hit rate monitored via CloudFront metrics; alert if hit rate drops below 80% | P2 | 4 | proposed |
 
 ---
 
@@ -383,6 +390,10 @@
 | ADR-012 | Student can belong to at most one school | Simplifies curriculum resolution; avoids conflicting curricula per student | 2026-03-23 | proposed |
 | ADR-013 | Curriculum pipeline reads units from PostgreSQL when triggered for school curricula | Allows pipeline to be triggered via API (not just CLI); same pipeline code handles both default and custom curricula | 2026-03-23 | proposed |
 | ADR-014 | Lesson view events sent from mobile on open/close; backend records duration | More accurate than client-computed duration; handles offline by queuing alongside progress events | 2026-03-23 | proposed |
+| ADR-015 | Three-level cache (L1 in-process TTLCache, L2 Redis, L3 CDN) | Hot read path must serve zero DB queries on cache-warm requests; each level serves a different latency/scope tradeoff | 2026-03-23 | accepted |
+| ADR-016 | Progress writes are fire-and-forget via Celery | Student response time must not be gated on DB write latency; writes can tolerate seconds of delay with dedup guarantees | 2026-03-23 | accepted |
+| ADR-017 | Audio files served via CloudFront pre-signed URLs; never proxied through API servers | Proxying audio through FastAPI would consume worker memory and bandwidth for no benefit; CDN handles caching and global delivery | 2026-03-23 | accepted |
+| ADR-018 | PgBouncer in transaction-pooling mode in front of PostgreSQL | Each uvicorn worker holds an asyncpg pool; without PgBouncer, total connections = workers × pool_max, easily exceeding PostgreSQL max_connections | 2026-03-23 | accepted |
 
 ---
 
@@ -392,3 +403,4 @@
 |---|---|---|---|
 | 2026-03-23 | 0.1.0 | — | Initial requirements document created from architecture review |
 | 2026-03-23 | 0.2.0 | — | Added school/teacher management, custom curriculum, student association, extended analytics, and feedback requirements (Phases 8–10) |
+| 2026-03-23 | 0.3.0 | — | Added BACKEND_ARCHITECTURE.md; updated NFR-PERF, NFR-REL, NFR-OBS to align with SLOs and architecture decisions; added ADR-015 through ADR-018 |

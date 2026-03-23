@@ -3,6 +3,7 @@
 **Version:** 0.2.0 (Design Phase — Feature Expansion)
 **Last updated:** 2026-03-23
 **Requirements tracking:** [REQUIREMENTS.md](REQUIREMENTS.md)
+**Companion docs:** [REQUIREMENTS.md](REQUIREMENTS.md) · [BACKEND_ARCHITECTURE.md](BACKEND_ARCHITECTURE.md)
 
 ---
 
@@ -43,8 +44,10 @@ graph TD
     end
 
     subgraph STORES["Data Stores"]
+        PGB["PgBouncer\nConnection Pooler"]
         DB[("PostgreSQL\nStudents · Sessions\nProgress · Scores\nSubscriptions")]
         CS[("Content Store\nS3 or filesystem\nlesson.json · quiz_set_N.json\nkeyed by unit_id + lang")]
+        CDN_NODE["CDN\nCloudFront / Cloudflare\nAudio MP3s · large JSON\nEdge caching"]
         CACHE[("Redis\nJWT session tokens\nhot content cache\nentitlement cache")]
     end
 
@@ -63,8 +66,11 @@ graph TD
     SDK -->|HTTPS| SUB
     SDK -->|HTTPS| I18N
 
-    AUTH & CURR & CONTENT & PROGRESS & SUB --> DB
+    AUTH & CURR & CONTENT & PROGRESS & SUB --> PGB
+    PGB --> DB
     CONTENT --> CS
+    CS --> CDN_NODE
+    CDN_NODE -->|Signed URLs for audio + JSON| SDK
     CONTENT --> CACHE
     AUTH --> CACHE
     SUB --> CACHE
@@ -829,6 +835,10 @@ Expose a `/metrics` endpoint (Prometheus format) or push to Datadog/CloudWatch. 
 | Content staleness | `meta.json` `generated_at` is older than curriculum JSON `mtime` by > 7 days | Medium |
 | Redis eviction spike | `evicted_keys` rate > 100/min | Medium |
 
+### Performance Targets
+
+Performance targets (SLOs) are defined in [BACKEND_ARCHITECTURE.md](BACKEND_ARCHITECTURE.md#performance-targets-slos).
+
 ### Pipeline Run Report
 
 On completion, `build_grade.py` emits a JSON summary:
@@ -1108,15 +1118,23 @@ Already tracked via `POST /progress/session` / `POST /progress/session/end`. The
 | Layer | Technology | Rationale |
 |---|---|---|
 | Mobile app | Python + Kivy (existing) | Reuse Free edition codebase; one tree → Android + iOS |
-| Backend API | FastAPI (Python) | Same language as app; async; auto-generates OpenAPI docs |
+| Backend API | FastAPI + uvicorn (Python) | Same language as app; async-native; auto-generates OpenAPI docs |
+| Process manager | gunicorn | Manages uvicorn worker processes; graceful reload |
 | Database | PostgreSQL | Relational; good for progress/session/subscription queries |
+| Async PostgreSQL driver | asyncpg | Fastest Python PostgreSQL driver; native async; replaces synchronous ORM for hot paths |
+| Connection pooler | PgBouncer | Transaction-mode pooling in front of PostgreSQL; prevents connection exhaustion |
 | Content Store | Filesystem (Phase 1–3), S3 (Phase 4+) | Start simple; migrate to S3 for scale |
-| Cache | Redis | JWT token store; hot content cache; entitlement cache |
+| CDN | CloudFront / Cloudflare | Sits in front of S3; serves audio MP3s and large JSON at edge; no API server bandwidth cost |
+| Cache | Redis | JWT token store; hot content cache; entitlement cache; Celery broker |
+| In-process cache | cachetools TTLCache | Zero-cost LRU+TTL per worker; no network hop for curriculum tree and JWT keys |
+| Background tasks | Celery + Redis broker | Mature; retry/backoff; task routing; Beat scheduler for nightly jobs |
+| Circuit breaker | circuitbreaker library | Wraps all external API calls (Stripe, Anthropic, TTS, SES) |
 | Content pipeline | Python CLI scripts | Runs Claude API calls offline; same prompts.py as Free edition |
 | Auth | JWT (python-jose) | Stateless; works offline between refreshes |
 | Payments | Stripe | Industry standard; hosted checkout removes PCI scope |
 | TTS | Amazon Polly / Google Cloud TTS | Both support en/fr/es; pre-generate at pipeline time |
 | i18n (UI strings) | Static dict bundled in app | No runtime API; offline; simple to maintain |
+| Deployment | Docker Compose (dev) / ECS or K8s (prod) | Reproducible environments; horizontal scaling in production |
 | CI | GitHub Actions | Tests + lint on push; pipeline dry-run on PR |
 
 ---
@@ -1132,6 +1150,8 @@ Already tracked via `POST /progress/session` / `POST /progress/session/end`. The
 - `GET /curriculum`, `GET /curriculum/{grade}` (serves existing JSON files)
 - Mobile app: replace local registration flow with backend auth; include language selection at registration
 - JWT storage on device (keystore / secure file); locale included in JWT payload
+- Configure PgBouncer in Docker Compose; asyncpg connection pools
+- asyncpg and aioredis pools initialised in FastAPI lifespan context manager (once per worker)
 
 **Milestone:** Student registers with language preference, logs in, and browses grade/subject/topic — all served from backend, no Anthropic calls.
 
@@ -1147,6 +1167,8 @@ Already tracked via `POST /progress/session` / `POST /progress/session/end`. The
 - Local SQLite cache on device: cache content by `unit_id + content_version + lang`
 - Entitlement middleware: track `lessons_accessed`; return HTTP 402 after 2 for free-tier students
 - `SubscriptionScreen` stub (no real payment yet — shows "Coming soon" or manual activation)
+- Set up Redis L2 caching for entitlement and content; nginx rate limiting
+- In-process L1 TTLCache for curriculum tree and JWT keys (cachetools)
 
 **Milestone:** Full lesson + quiz flow with instant English content. No Anthropic API key required by student.
 
@@ -1175,6 +1197,8 @@ Already tracked via `POST /progress/session` / `POST /progress/session/end`. The
 - TTS pipeline step: generate `lesson_{lang}.mp3` for each lesson
 - `GET /content/{unit_id}/lesson/audio` endpoint
 - Mobile: "🔊 Listen" button on SubjectScreen; downloads and plays MP3; cached for offline
+- Configure CloudFront CDN in front of S3; pre-signed URL generation for audio
+- Cache-Control headers set on S3 objects (lesson JSON: 1 hr, MP3: 24 hr)
 
 **Milestone:** Student can switch to French or Spanish and hear lessons read aloud, even offline after first download.
 

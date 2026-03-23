@@ -6,6 +6,7 @@
 > layer boundaries, and the most common mistakes to avoid.
 
 > **Requirements tracking:** feature requirements, non-functional requirements, and architectural decisions are tracked in [REQUIREMENTS.md](REQUIREMENTS.md). Check the status column before implementing — a requirement may be `deferred` or already `in-progress`.
+> **Backend performance architecture:** [BACKEND_ARCHITECTURE.md](BACKEND_ARCHITECTURE.md) — caching strategy, connection pools, hot path rules, SLOs, deployment topology.
 
 ---
 
@@ -207,6 +208,14 @@ Never use `print()`. Backend logs go to stdout (captured by the container runtim
 - **Schema validation:** after each Claude call, run `jsonschema.validate(response, SCHEMA[content_type])`. On `ValidationError`, log the raw response and retry (up to 3 times). After 3 failures, append to `pipeline_failures.json` and continue to the next unit.
 - **Cost tracking:** maintain a running `tokens_used` counter across the pipeline run. If `tokens_used * TOKEN_COST_USD > MAX_PIPELINE_COST_USD`, abort the run and log a warning. Default `MAX_PIPELINE_COST_USD = 50.0`.
 
+### Performance
+
+- **Connection pools initialised once at worker startup** — create `asyncpg` and `aioredis` pools in the FastAPI `lifespan` context manager, not per-request. Store them on `app.state`. Inject via `Depends(get_db)` and `Depends(get_redis)` dependencies.
+- **Cache read order: L1 → L2 → DB** — always check the in-process `TTLCache` first (zero network cost), then Redis (< 1 ms), then PostgreSQL (5–20 ms). Never skip a cache level on the hot read path.
+- **Explicit cache invalidation on state changes** — entitlement cache must be invalidated when: (a) a lesson is accessed (increment `lessons_accessed`), (b) subscription status changes, (c) student transfers school. Curriculum resolver cache must be invalidated when: (a) student joins or leaves a school, (b) a new curriculum is activated. Use a helper `invalidate_student_cache(student_id)` that deletes both keys atomically.
+- **Write endpoints return before the DB write** — `POST /progress/answer` and `POST /analytics/lesson/end` dispatch a Celery task and return `200 OK` immediately. Never await the DB write on the request path for these endpoints.
+- **Celery task routing** — pipeline tasks go to the `pipeline` queue (separate high-CPU workers). Light IO tasks (email, webhook) go to the `io` queue. Never put pipeline tasks on the `default` queue — a large pipeline run would starve email delivery.
+
 ### School & Curriculum
 
 - **Curriculum resolver:** implement as FastAPI middleware or a dependency (`get_resolved_curriculum_id(student=Depends(get_current_student))`). Every content endpoint calls this dependency — never inline the resolution logic per-endpoint.
@@ -285,6 +294,11 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 28. **No attempt_number on quiz sessions** — without `attempt_number`, analytics cannot distinguish a student's first attempt from their fifth. Compute `attempt_number` server-side as `COUNT(*) + 1` from prior sessions for (student_id, unit_id, curriculum_id) before inserting the new session row. Never compute it client-side.
 29. **Storing teacher credentials in the student JWT** — teachers and students have separate JWT secrets and separate auth endpoints. A student JWT must never grant access to teacher endpoints, and vice versa. Middleware must check both `role` and `resource ownership` (e.g., a teacher can only access analytics for their own school).
 30. **Sending pipeline failure emails with no actionable detail** — when a unit fails pipeline generation, the email to the teacher must include: unit name, unit code, failure reason (schema validation vs. API error), and a link to the admin panel. "Your pipeline failed" with no detail forces a support request.
+31. **Calling a synchronous library inside an async FastAPI route** — any blocking call (synchronous DB driver, `time.sleep`, `requests.get`, synchronous file I/O) blocks the entire uvicorn event loop and stalls all concurrent requests on that worker. Use `asyncpg` for DB, `aioredis` for Redis, `httpx.AsyncClient` for HTTP. Wrap unavoidable blocking calls (bcrypt, CPU-bound processing) with `await asyncio.get_event_loop().run_in_executor(None, fn, *args)`.
+32. **Proxying audio through the API server** — never stream MP3 bytes from S3 through a FastAPI response. Generate a pre-signed S3/CloudFront URL and return it to the client. Streaming audio ties up a worker for the entire download duration (potentially minutes on a slow mobile connection).
+33. **Not sizing the connection pool relative to worker count** — total PostgreSQL connections = `num_workers × pool_max_size`. With 4 workers and `pool_max=20` that is 80 connections. Add Celery workers and you can hit PostgreSQL `max_connections` (default 100) instantly. Always deploy PgBouncer in transaction-pooling mode; set `pool_max` per worker to 10–20; set PostgreSQL `max_connections` to ≥ 200.
+34. **Invalidating Redis cache but forgetting the CDN** — when a content version bump occurs, clearing Redis L2 is not enough. CloudFront may still serve the old `lesson_en.json` from edge caches for up to 1 hour (or the configured TTL). On pipeline completion, call `cloudfront.create_invalidation(paths=[f"/{curriculum_id}/{unit_id}/*"])` for every rebuilt unit.
+35. **Deploying Redis without AOF persistence** — if Redis restarts with `appendonly no`, all cached entitlements, JWT refresh tokens, rate limit counters, and pipeline job states are lost. Every student is immediately logged out. Every rate limit counter resets. Set `appendonly yes` and `appendfsync everysec` before going to production.
 
 ---
 
@@ -307,6 +321,10 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] Sentry SDK initialised in backend and mobile
 - [ ] CORS policy configured via `ALLOWED_ORIGINS` env var
 - [ ] HTTPS enforced; HTTP → HTTPS redirect configured
+- [ ] asyncpg connection pool initialised in FastAPI lifespan context
+- [ ] aioredis connection pool initialised in FastAPI lifespan context
+- [ ] PgBouncer configured in Docker Compose (transaction-pooling mode)
+- [ ] bcrypt run in thread pool executor (not blocking event loop)
 
 ### Phase 2 — Content Pipeline + Delivery (English)
 - [ ] `pipeline/build_grade.py` CLI working end-to-end (`--grade N --lang en`)
@@ -328,6 +346,11 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] Mobile: `SubscriptionScreen` stub (no real payment)
 - [ ] Structured log aggregation platform configured (CloudWatch / ELK / Loki)
 - [ ] Uptime monitoring on `/health` (external ping, 60-second interval)
+- [ ] Redis L2 cache: entitlement and curriculum resolver with 300s TTL
+- [ ] In-process L1 cache (cachetools TTLCache) for curriculum tree and JWT keys
+- [ ] nginx configured: TLS, rate limiting, gzip, keep-alive upstream
+- [ ] Celery workers configured: pipeline queue + default queue
+- [ ] Progress write endpoints use fire-and-forget Celery task pattern
 
 ### Phase 3 — Progress Tracking
 - [ ] Progress endpoints: session, answer, session/end
@@ -345,6 +368,10 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] `GET /content/{unit_id}/lesson/audio` endpoint
 - [ ] Mobile: language picker in Settings; switches locale + clears content cache
 - [ ] Mobile: "🔊 Listen" button on SubjectScreen; caches MP3 for offline
+- [ ] CloudFront CDN configured in front of S3 bucket
+- [ ] Audio endpoint returns pre-signed CloudFront URL; does not proxy bytes
+- [ ] Cache-Control headers set on S3 objects (lesson JSON: 1hr, MP3: 24hr)
+- [ ] CDN invalidation triggered on content version bump
 
 ### Phase 5 — Subscription + Payments
 - [ ] PostgreSQL `subscriptions` table

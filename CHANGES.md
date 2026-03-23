@@ -67,4 +67,33 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ---
 
+---
+
+## 2026-03-23
+
+### Documentation
+- Added REQUIREMENTS.md: full requirements tracking with ~150 FR/NFR entries, ADR log
+- Expanded ARCHITECTURE.md: security controls, compliance (COPPA/GDPR), observability,
+  content quality, multi-tenancy/curriculum model, school & teacher management,
+  curriculum upload, student-school association, extended analytics, student feedback,
+  Phases 8–10
+- Added BACKEND_ARCHITECTURE.md: performant backend design — three-level caching,
+  async-throughout application model, PgBouncer, Celery worker topology, nginx gateway,
+  circuit breakers, critical DB indexes, materialized views, SLOs, deployment topologies
+- Expanded AGENTS.md: 22 additional pitfalls (9–30), 6 new convention sections,
+  updated phase checklists for Phases 1–7, new checklists for Phases 8–10
+
+### Cross-file consistency updates (this session)
+- ARCHITECTURE.md: added BACKEND_ARCHITECTURE.md companion doc link; expanded Technology
+  Stack table with gunicorn, asyncpg, PgBouncer, CDN, cachetools, Celery, circuitbreaker,
+  and Docker/ECS deployment rows; added Performance Targets subsection in Observability;
+  updated System Overview diagram with PgBouncer and CDN nodes; added backend architecture
+  notes to Phase 1, 2, and 4 in the Phased Implementation Plan
+- REQUIREMENTS.md: updated NFR-PERF-001/002/003 to align with SLOs from
+  BACKEND_ARCHITECTURE.md; added NFR-PERF-006/007, NFR-REL-010/011/012,
+  NFR-OBS-012/013; added ADR-015 through ADR-018; bumped version to 0.3.0
+- AGENTS.md: added BACKEND_ARCHITECTURE.md reference line; added pitfalls 31–35
+  (event loop blocking, audio proxying, connection pool sizing, CDN invalidation, Redis
+  AOF persistence); added Performance conventions section; updated Phase 1/2/4 checklists
+
 *Last updated: 2026-03-23*
