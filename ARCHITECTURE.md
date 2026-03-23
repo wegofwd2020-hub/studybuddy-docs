@@ -617,7 +617,7 @@ stateDiagram-v2
 | `suspended` | JWT rejected with `403 Forbidden`; added to Redis `suspended:{id}` set |
 | `deleted` | Soft-deleted; PII anonymised on 30-day GDPR schedule; JWT always rejected |
 
-**Suspension JWT revocation:** on suspension, `student_id` / `teacher_id` is added to Redis key `suspended:{id}` (TTL = max JWT lifetime, 15 min). Auth middleware checks this set immediately after signature verification — zero DB queries on hot path.
+**Suspension JWT revocation:** on suspension, `student_id` / `teacher_id` is added to Redis key `suspended:{id}` with **no TTL**. The key persists until the account is explicitly reactivated — at which point the key is deleted via `DEL suspended:{id}`. Auth middleware checks this set immediately after signature verification — zero DB queries on hot path. Do not set a TTL on suspension keys; a 15-min TTL would silently restore access without any admin action.
 
 **Auth0 sync on suspension:** a Celery task calls Auth0 Management API `PATCH /api/v2/users/{external_auth_id}` with `{"blocked": true}`. This prevents re-login even if the internal JWT has expired. Our `account_status` is authoritative; Auth0 sync is best-effort.
 
@@ -627,6 +627,30 @@ stateDiagram-v2
 
 All endpoints require `Authorization: Bearer <jwt>` except `/auth/*`, `/admin/auth/*`, and `/subscription/webhook`.
 
+### Standard Response Envelopes
+
+**Error responses** (4xx / 5xx) always use this shape:
+```json
+{
+  "error": "short_snake_case_code",
+  "detail": "Human-readable explanation of what went wrong.",
+  "correlation_id": "uuid-v4-from-X-Correlation-Id-header"
+}
+```
+The `X-Correlation-Id` header is set on every response (success and error alike). Clients must log it for support requests. Never include stack traces or internal paths in the `detail` field.
+
+**Paginated list responses** always use this shape:
+```json
+{
+  "items": [...],
+  "total": 142,
+  "page": 1,
+  "per_page": 50,
+  "pages": 3
+}
+```
+Default `per_page` is 50; maximum is 200. Pass `?page=N&per_page=N` as query parameters.
+
 ### Auth — Students (External Provider)
 
 | Method | Endpoint | Body | Returns |
@@ -634,6 +658,7 @@ All endpoints require `Authorization: Bearer <jwt>` except `/auth/*`, `/admin/au
 | POST | `/auth/exchange` | `{id_token}` | `{token, refresh_token, student_id}` |
 | POST | `/auth/teacher/exchange` | `{id_token}` | `{token, refresh_token, teacher_id}` |
 | POST | `/auth/refresh` | `{refresh_token}` | `{token}` |
+| POST | `/auth/logout` | `{refresh_token}` | `200` (deletes refresh token from Redis) |
 | POST | `/auth/forgot-password` | `{email}` | `200` (always; triggers Auth0 reset email) |
 | PATCH | `/student/profile` | `{name?, locale?, grade?}` | `{student}` |
 | DELETE | `/auth/account` | — | `200` (GDPR erasure + Auth0 user deletion) |
@@ -1136,8 +1161,20 @@ erDiagram
     STUDENT ||--o| SUBSCRIPTION : "has"
     STUDENT ||--o{ SESSION : "takes"
     SESSION ||--o{ PROGRESS_ANSWER : "records"
+    PARENTAL_CONSENT {
+        uuid consent_id PK
+        uuid student_id FK
+        string guardian_email
+        string status "pending|granted|denied|expired"
+        string consent_token "single-use UUID; stored hashed"
+        timestamp token_expires_at
+        timestamp consented_at
+        inet ip_address
+        timestamp created_at
+    }
     STUDENT ||--o{ LESSON_VIEW : "views"
     STUDENT ||--o{ FEEDBACK : "submits"
+    STUDENT ||--o{ PARENTAL_CONSENT : "requires (age < 13)"
     CURRICULUM_UNIT ||--o{ SESSION : "assessed by"
     CURRICULUM_UNIT ||--o{ LESSON_VIEW : "viewed via"
 ```
@@ -1196,16 +1233,28 @@ The backend sets an explicit CORS allowlist:
 
 ### Secrets Management
 
-| Secret | Storage |
-|---|---|
-| `ANTHROPIC_API_KEY` | Backend env var (pipeline only) |
-| `JWT_SECRET` | Backend env var; use secrets manager in production |
-| `STRIPE_SECRET_KEY` | Backend env var; use secrets manager in production |
-| `STRIPE_WEBHOOK_SECRET` | Backend env var |
-| `TTS_API_KEY` | Pipeline env var |
-| `DATABASE_URL` | Backend env var; use secrets manager in production |
+| Secret | Storage | Used By |
+|---|---|---|
+| `JWT_SECRET` | Backend env var (secrets manager in prod) | Student/teacher JWT signing (HS256, Phase 1) |
+| `ADMIN_JWT_SECRET` | Backend env var (separate from JWT_SECRET) | Admin JWT signing; different secret prevents cross-use |
+| `DATABASE_URL` | Backend env var (secrets manager in prod) | asyncpg pool |
+| `REDIS_URL` | Backend env var | aioredis pool |
+| `AUTH0_DOMAIN` | Backend env var | JWKS URL derivation; id_token verification |
+| `AUTH0_JWKS_URL` | Backend env var | Explicit JWKS endpoint (cached with 1-hr TTL) |
+| `AUTH0_STUDENT_CLIENT_ID` | Backend env var | Validate `aud` claim on student id_tokens |
+| `AUTH0_TEACHER_CLIENT_ID` | Backend env var | Validate `aud` claim on teacher id_tokens |
+| `AUTH0_MGMT_CLIENT_ID` | Backend env var | Auth0 Management API M2M app |
+| `AUTH0_MGMT_CLIENT_SECRET` | Backend env var (secrets manager in prod) | Auth0 Management API M2M app |
+| `STRIPE_SECRET_KEY` | Backend env var (secrets manager in prod) | Stripe SDK |
+| `STRIPE_WEBHOOK_SECRET` | Backend env var | Webhook signature verification |
+| `SENTRY_DSN` | Backend env var | Sentry exception capture |
+| `METRICS_TOKEN` | Backend env var | Bearer token for `/metrics` scrape endpoint |
+| `ANTHROPIC_API_KEY` | Pipeline env var only | Content generation (never in backend) |
+| `TTS_API_KEY` | Pipeline env var only | TTS audio generation |
 
-In production, source all secrets from AWS Secrets Manager, HashiCorp Vault, or equivalent. Never commit secrets to git.
+**JWT Algorithm:** Phase 1 uses HS256 (symmetric). RS256 with `kid` rotation is deferred to Phase 2+ when multi-service token verification is needed.
+
+In production, source all secrets from AWS Secrets Manager, HashiCorp Vault, or equivalent. Never commit secrets to git. `config.py` must call `model_validator` to fail fast at startup if any required secret is absent — no silent defaults.
 
 ### Redis Security
 

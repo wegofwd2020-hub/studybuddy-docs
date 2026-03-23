@@ -79,6 +79,23 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ---
 
+## 2026-03-23 (Phase 1 Gap Closure)
+
+### Phase 1 readiness — all gaps closed (this session)
+- Gap analysis identified 10 critical Phase 1 blockers; all resolved
+- Created PHASE1_SETUP.md: Auth0 tenant setup (7 steps), complete .env.example with all
+  previously missing vars, PostgreSQL DDL for all Phase 1 tables, PgBouncer config,
+  nginx config, Kivy/Python PKCE flow, conftest.py testing setup, standard API contracts,
+  design clarifications
+- ARCHITECTURE.md patches:
+  - Fixed suspension TTL bug: `suspended:{id}` Redis key has NO TTL; explicitly deleted on
+    reactivation only (prior text said TTL = 15 min, which would silently restore access)
+  - Added `POST /auth/logout` to Auth endpoints table (deletes refresh token from Redis)
+  - Expanded Secrets Management table from 6 → 16 rows; added all Auth0 vars, ADMIN_JWT_SECRET,
+    SENTRY_DSN, METRICS_TOKEN; added JWT algorithm note (HS256 Phase 1, RS256 deferred)
+  - Added PARENTAL_CONSENT entity to ERD with `consent_token`, `token_expires_at`, `ip_address`
+  - Added Standard Response Envelopes section (error shape + pagination shape) to API Design
+
 ## 2026-03-23
 
 ### Documentation
