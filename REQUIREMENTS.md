@@ -526,6 +526,56 @@
 
 ---
 
+### NFR-DR: Disaster Recovery
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| NFR-DR-001 | PostgreSQL primary backed up daily (snapshot or `pg_dump`) at 02:00 UTC; 30-day retention; stored in a separate bucket/path from production | P0 | 1 | proposed |
+| NFR-DR-002 | Continuous WAL archiving enabled; WAL segments retained for 7 days | P0 | 1 | proposed |
+| NFR-DR-003 | Replica promotion runbook documented and tested; RTO ≤ 15 minutes; RPO ≤ 5 minutes (WAL streaming lag) | P0 | 1 | proposed |
+| NFR-DR-004 | Point-in-time restore tested monthly to a staging instance; result recorded in the incident log | P1 | 1 | proposed |
+| NFR-DR-005 | Redis configured with AOF persistence (`appendonly yes`, `appendfsync everysec`); RDB snapshot daily | P0 | 1 | proposed |
+| NFR-DR-006 | Content Store backed up via daily incremental snapshot at 03:00 UTC; 30-day retention; cross-region copy at Scale tier | P1 | 4 | proposed |
+| NFR-DR-007 | Full service RTO ≤ 4 hours; RPO ≤ 24 hours in catastrophic failure scenario | P1 | 1 | proposed |
+| NFR-DR-008 | Secrets Manager versioning enabled; full version history retained | P0 | 1 | proposed |
+| NFR-DR-009 | Staging and dev environments must never contain real student PII; CI must never connect to production databases | P0 | 1 | proposed |
+| NFR-DR-010 | SLA target: 99.9% uptime (≤ 8.7 hours unplanned downtime per year) | P1 | 1 | proposed |
+
+---
+
+### NFR-SCALE: Scalability & Load Testing
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| NFR-SCALE-001 | Hot read path (lesson, quiz) must serve ≤ 50 ms p95 at 10,000 concurrent students with cache-warm L2 Redis | P0 | 2 | proposed |
+| NFR-SCALE-002 | Database connection pooling via PgBouncer (transaction mode); `max_connections ≥ 200`; asyncpg pool `min=5, max=20` per worker | P0 | 1 | proposed |
+| NFR-SCALE-003 | Pre-release load test required for any change to the content or auth hot path; gate blocks deploy on SLO breach | P0 | 2 | proposed |
+| NFR-SCALE-004 | Load test tool: k6; minimum scenarios: baseline (steady state), content spike, auth storm, progress write storm | P1 | 2 | proposed |
+| NFR-SCALE-005 | `progress_sessions`, `lesson_views`, `progress_answers`, `audit_log` tables range-partitioned by month when rows exceed 50 M; `CREATE INDEX CONCURRENTLY` for all index additions | P1 | 5 | proposed |
+| NFR-SCALE-006 | Redis Sentinel used at < 100k students; Redis Cluster (3 primary shards + 3 replicas) introduced when total keys exceed 5 M or dataset exceeds 4 GB | P1 | 5 | proposed |
+| NFR-SCALE-007 | Multi-region deployment (US primary + EU standby) introduced at Scale tier (100k+ students); GeoDNS routing; EU student PII must not leave EU region | P2 | 5 | proposed |
+| NFR-SCALE-008 | Pipeline quota enforced: 3 runs/school/day; 200 units/run; 5 platform-wide concurrent pipeline jobs; $50 per-run spend cap | P1 | 8 | proposed |
+| NFR-SCALE-009 | CDN cache hit rate ≥ 80%; alert if rate drops below threshold (monitored via CDN metrics) | P1 | 4 | proposed |
+| NFR-SCALE-010 | API worker count scales horizontally; stateless design ensures any worker can handle any request | P0 | 1 | proposed |
+| NFR-SCALE-011 | Soak test (8-hour sustained load at 60% peak) run monthly; results reviewed by engineering team | P2 | 3 | proposed |
+
+---
+
+### NFR-PUSH: Push Notifications
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| NFR-PUSH-001 | Push notifications delivered via FCM (Android); iOS support added when mobile client ships to iOS | P1 | 4 | proposed |
+| NFR-PUSH-002 | FCM tokens stored in `push_tokens` table; token registered on login; deleted on logout or explicit unregister | P1 | 4 | proposed |
+| NFR-PUSH-003 | Notification preferences stored per student; all notification types default-on except quiz nudges (default-off) | P2 | 4 | proposed |
+| NFR-PUSH-004 | Maximum 2 push notifications per student per day (global rate limit across all event types) | P1 | 4 | proposed |
+| NFR-PUSH-005 | Quiet hours respected; no notifications sent between `quiet_hours_start` and `quiet_hours_end` in student's locale timezone | P1 | 4 | proposed |
+| NFR-PUSH-006 | Notification types: streak at risk (daily), new content available (on publish), quiz nudge (48 h after lesson view without quiz start), weekly summary (Sunday) | P2 | 4 | proposed |
+| NFR-PUSH-007 | Push notification tasks run via Celery Beat queue `io`; delivery failures retried up to 3 times with 60-second backoff | P1 | 4 | proposed |
+| NFR-PUSH-008 | Stale FCM tokens (no `last_seen_at` update in 90 days) purged by Celery Beat weekly | P2 | 4 | proposed |
+
+---
+
 ## Architectural Decisions Log
 
 | ID | Decision | Rationale | Date | Status |

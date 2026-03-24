@@ -893,6 +893,44 @@ All report endpoints require a teacher or school_admin JWT. Students cannot acce
 
 ---
 
+### API Versioning
+
+All backend API routes are prefixed with `/api/v1/`. The version is part of the URL path — not a header or query parameter — so it can be routed, cached, and load-balanced independently.
+
+#### Backward Compatibility Rules
+
+| Change type | Safe? | Notes |
+|---|---|---|
+| Add optional field to response | ✓ Safe | Clients must ignore unknown fields |
+| Add optional request field | ✓ Safe | Server provides default |
+| Add new endpoint | ✓ Safe | Existing clients unaffected |
+| Remove a response field | ✗ Breaking | Requires a new major version |
+| Remove or rename an endpoint | ✗ Breaking | Requires a new major version |
+| Change field type or semantics | ✗ Breaking | Requires a new major version |
+| Add required request field | ✗ Breaking | Requires a new major version |
+
+#### Deprecation Lifecycle
+
+When a field or endpoint is deprecated, responses include:
+
+```
+Deprecation: true
+Sunset: Sat, 31 Dec 2026 23:59:59 GMT
+```
+
+Minimum deprecation window: **6 months** from first `Deprecation: true` header before removal. The mobile app checks `GET /app/version` on startup:
+
+| Field | Purpose |
+|---|---|
+| `min_version` | Soft gate — prompt user to update |
+| `hard_min_version` | Hard gate — block app until updated |
+| `deprecated_api_versions` | List of version strings nearing sunset |
+| `maintenance_message` | Optional banner displayed to all students |
+
+A major version bump (`v2`) is only introduced when a breaking change cannot be avoided. `/api/v1/` routes remain live for 6 months after `/api/v2/` launches.
+
+---
+
 ## Data Models
 
 ### Student
@@ -2210,6 +2248,33 @@ flowchart TD
 
 Default curriculum IDs follow the pattern `default-{year}-g{grade}` (e.g. `default-2026-g8`). School curriculum IDs are UUIDs.
 
+### Academic Year Transitions
+
+Default curriculum IDs include the year (`default-2026-g8`) so last year's content remains accessible during the grace period. Grade promotion and content transitions are handled automatically by Celery Beat.
+
+| Event | When | Mechanism |
+|---|---|---|
+| New academic year content ready | August (northern) / January (southern) | `seed_default.py --year {year}` + `build_grade.py` pipeline run per grade |
+| Grade promotion | Configurable per region (default: 1 Sep) | Celery Beat task `promote_student_grades` updates `student.grade`; invalidates `ent:*` and `cur:*` Redis keys |
+| Old content grace period | 30 days post-promotion | Old `default-{prev_year}-g{grade}` content remains live; students mid-unit can complete it |
+| Old content archive | 30 days post-promotion | Old subject versions set to `archived`; CDN paths invalidated; storage retained for rollback |
+
+**Annual pipeline checklist** (operator):
+1. Run `seed_default.py --year {year}` to create new curriculum rows.
+2. Run `build_grade.py --grade N --lang en,fr,es` for each grade 5–12.
+3. Review AlexJS warnings and complete human review for all subjects.
+4. Publish all subjects (`POST /admin/content/publish`) before grade-promotion date.
+5. Set `GRADE_PROMOTION_DATE` env var; Celery Beat triggers automatically.
+6. Monitor DB query rate spike as `cur:*` cache warms post-promotion.
+
+Academic year start dates are configured in `config.py`:
+```python
+ACADEMIC_YEAR_START = {
+    "northern": "09-01",   # September 1
+    "southern": "01-30",   # January 30
+}
+```
+
 ---
 
 ## School & Teacher Management
@@ -2787,6 +2852,90 @@ mv_feedback_summary     — per (curriculum_id, unit_id)
 ```
 
 For the Teacher Dashboard, data may be up to 24 hours stale (nightly refresh). A "Last updated" timestamp is shown on every report. On-demand refresh available for school_admin role (triggers immediate Celery task).
+
+---
+
+## Push Notifications
+
+### Overview
+
+Push notifications are delivered to Android (and future iOS) via **Firebase Cloud Messaging (FCM)**. Notification logic runs as Celery Beat tasks; the mobile app requests the FCM token at login and registers it via `POST /notifications/token`.
+
+### Database Schema
+
+```sql
+CREATE TABLE push_tokens (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    student_id    UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    fcm_token     TEXT NOT NULL UNIQUE,
+    platform      TEXT NOT NULL CHECK (platform IN ('android', 'ios', 'web')),
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE notification_preferences (
+    student_id         UUID PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+    streak_reminders   BOOLEAN NOT NULL DEFAULT TRUE,
+    new_content        BOOLEAN NOT NULL DEFAULT TRUE,
+    quiz_nudges        BOOLEAN NOT NULL DEFAULT FALSE,
+    weekly_summary     BOOLEAN NOT NULL DEFAULT TRUE,
+    quiet_hours_start  TIME,            -- e.g. 22:00 local time
+    quiet_hours_end    TIME             -- e.g. 08:00 local time
+);
+```
+
+### Notification Events
+
+| Event | Trigger | Frequency cap |
+|---|---|---|
+| Streak at risk | Celery Beat daily; student active yesterday but not today | 1/day |
+| New content available | On subject publish for student's grade | 1/publish event |
+| Quiz nudge | Student viewed lesson but has not started quiz in 48 hours | 1/unit |
+| Weekly summary | Celery Beat every Sunday | 1/week |
+
+**Global rate limit:** maximum 2 push notifications per student per day. Quiet hours are respected using the student's `locale`-derived timezone. Students who opt out via `notification_preferences` are excluded.
+
+### Celery Tasks
+
+```python
+# tasks/notifications.py
+
+@app.task(queue="io")
+def check_streak_reminders():
+    """Runs daily. Finds students with streak at risk; enqueues send_push_notification."""
+    students = db.query(
+        "SELECT s.id, s.locale, pt.fcm_token FROM students s "
+        "JOIN push_tokens pt ON pt.student_id = s.id "
+        "JOIN notification_preferences np ON np.student_id = s.id "
+        "WHERE np.streak_reminders = TRUE "
+        "  AND s.last_activity_date = CURRENT_DATE - 1"
+    )
+    for student in students:
+        send_push_notification.delay(
+            student_id=student.id,
+            fcm_token=student.fcm_token,
+            title=i18n("streak_at_risk.title", student.locale),
+            body=i18n("streak_at_risk.body", student.locale),
+            event_type="streak_at_risk",
+        )
+
+@app.task(queue="io", max_retries=3, default_retry_delay=60)
+def send_push_notification(student_id, fcm_token, title, body, event_type):
+    """Sends a single FCM push notification. Respects quiet hours and daily cap."""
+    if not within_send_window(student_id):
+        return  # quiet hours or daily cap reached
+    fcm.send(Message(token=fcm_token, notification=Notification(title=title, body=body)))
+    emit_event("push", event_type, student_id=student_id)
+```
+
+### API Endpoints
+
+| Method | Endpoint | Body | Access |
+|---|---|---|---|
+| POST | `/notifications/token` | `{fcm_token, platform}` | student JWT |
+| DELETE | `/notifications/token` | `{fcm_token}` | student JWT |
+| GET | `/notifications/preferences` | — | student JWT |
+| PUT | `/notifications/preferences` | `{streak_reminders?, new_content?, quiz_nudges?, weekly_summary?, quiet_hours_start?, quiet_hours_end?}` | student JWT |
 
 ---
 
