@@ -30,6 +30,11 @@ Tracks all decisions, design changes, and implementation milestones.
 | D-22 | Suspension enforced via Redis set in auth middleware; Auth0 block is best-effort async | Avoids DB query on every authenticated request; 15-min TTL matches JWT lifetime for instant effective revocation |
 | D-18 | Student dashboard cached at L1+L2 (60 s TTL), invalidated on session end | Dashboard is read on every app open; caching eliminates DB fan-out on hot path; short TTL ensures freshness |
 | D-19 | `/student/*` report endpoints derive student_id exclusively from JWT | Prevents one student accessing another's progress; no client-supplied student_id accepted |
+| D-22 | Suspension enforced via Redis set **with no TTL** in auth middleware; Auth0 block is best-effort async | Avoids DB query on every authenticated request; no TTL ensures suspension persists until explicitly lifted — a TTL would silently restore access |
+| D-23 | Static in-code RBAC (`ROLE_PERMISSIONS` map); no DB-backed permission table | Seven fixed roles with deterministic permissions; zero hot-path DB queries for permission checks; map can be replaced with DB-backed system later without changing call sites |
+| D-24 | AlexJS automated language analysis in the pipeline before human review | Catches insensitive language (profanity, gendered phrasing, ableist terms) at generation time; warnings feed review queue without blocking pipeline throughput |
+| D-25 | Content versioning at subject level, not unit level | Subject is the atomic publication unit; avoids partially reviewed content reaching students; rollback always restores a coherent subject snapshot |
+| D-26 | Block and publish require separate permission levels (`review:approve` vs `content:publish`) | Two-party check: a school_admin can approve for their school but only a product_admin can make it live on the platform |
 
 ---
 
@@ -74,6 +79,15 @@ Tracks all decisions, design changes, and implementation milestones.
 | P-25 | `ExperimentScreen` mobile UI (step-by-step lab guide) | 6 |
 | P-26 | Admin API + dashboard | 7 |
 | P-27 | Subscription analytics (MRR, churn, conversion) | 7 |
+| P-32 | RBAC: `core/permissions.py` `ROLE_PERMISSIONS` map + `require_permission()` dependency | 7 |
+| P-33 | AlexJS pipeline integration: `pipeline/alex_checker.py` + `alex_report.json` per unit | 2 |
+| P-34 | `content_subject_versions` PostgreSQL schema + Alembic migration | 2 |
+| P-35 | Content endpoint guard: `status = published` AND no active block | 2 |
+| P-36 | Content review queue + annotation + rating + approve/reject endpoints (Phase 7) | 7 |
+| P-37 | Dictionary/thesaurus integration: Datamuse + Merriam-Webster API | 7 |
+| P-38 | Publish + rollback + CDN invalidation for content versioning | 7 |
+| P-39 | Content block + lift endpoints; school-scoped and platform-wide | 7 |
+| P-40 | Student marked-text feedback: mobile UI + `POST /content/{unit_id}/feedback/marked` | 7 |
 
 ---
 

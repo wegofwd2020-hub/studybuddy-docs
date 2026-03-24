@@ -320,6 +320,13 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 44. **Checking `account_status` in PostgreSQL inside the auth middleware** — this adds a DB query to every authenticated request. Store suspension state in a Redis set (`suspended:{id}`, TTL = JWT lifetime). The middleware reads only from Redis after signature verification; PostgreSQL is never queried on the hot path for status checks.
 40. **Computing learning streaks from raw `progress_sessions` on every dashboard request** — a streak query scans every session row for the student, which grows unboundedly. Store `{current, longest, last_active_date}` in a Redis hash (`streak:{student_id}`) and update it via a Celery task on the first progress event of each calendar day. The dashboard reads only the Redis hash — zero DB queries for streak data.
 41. **Returning another student's progress from `/student/dashboard` or `/student/progress`** — these endpoints must compare the `student_id` extracted from the JWT against the owner of the requested data. Never rely on a `student_id` query parameter; derive it exclusively from the verified JWT payload.
+49. **Skipping the review gate on content endpoints** — the content serving path must check `content_subject_versions.status = 'published'` AND no active `content_blocks` record before returning any content. Bypassing this check (even in dev) lets unapproved or AlexJS-flagged content reach students. Use `REVIEW_AUTO_APPROVE=true` in dev `.env` instead of removing the check.
+50. **Applying a scope check only in the UI, not on the backend** — a `school_admin` or `teacher` JWT must be scope-checked server-side: their `school_id` claim must match the resource's `school_id` before any write or approval action proceeds. Never rely on the frontend to filter what the user sees.
+51. **Approving and publishing in a single step** — approval and publication are separate actions with separate permission levels. `review:approve` (school_admin / product_admin) marks a version `approved`. `content:publish` (product_admin / super_admin only) then makes it live. Merging these into one step bypasses the two-party check.
+52. **Not invalidating the CDN after a rollback** — rollback swaps which version is `published`, but CloudFront may still serve the old lesson JSON for up to an hour. Both publish and rollback must call `cloudfront.create_invalidation` for the affected `curricula/{curriculum_id}/*` paths, in addition to clearing L2 Redis.
+53. **Blocking on the AlexJS subprocess in an async pipeline** — `subprocess.run()` is synchronous and blocks the thread. When called from an async Celery task, wrap it with `asyncio.get_event_loop().run_in_executor(None, run_alex, text)` or run the pipeline in a thread-based Celery worker (not an async one).
+54. **Letting a content block accumulate without surfacing it to the student** — when content is blocked, the content endpoint must return HTTP 403 with a clear error code (`content_blocked`), not a silent 404. The mobile app must display a human-readable "Content temporarily unavailable" message rather than an empty screen.
+55. **Using the same JWT secret for student, teacher, and admin JWTs** — three separate secrets (`JWT_SECRET`, `TEACHER_JWT_SECRET` can share `JWT_SECRET` but admin uses `ADMIN_JWT_SECRET`) prevent cross-role token replay. A compromised student JWT must never be accepted on a review or admin endpoint. Always verify `role` claim AND signature key together in middleware.
 
 ---
 
@@ -363,11 +370,16 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] Pipeline is idempotent: skip units already at target `content_version` unless `--force`
 - [ ] Pipeline pins Claude model ID in `pipeline/config.py`; never uses implicit latest
 - [ ] Pipeline validates each generated JSON against schema before writing; retries up to 3×
+- [ ] AlexJS runs after schema validation for each unit; result written to `alex_report.json`
+- [ ] `content_subject_versions` record created per subject per pipeline run; status `ready_for_review` or `needs_review` based on AlexJS warning count
+- [ ] PostgreSQL schema: `content_subject_versions`, `content_reviews`, `content_annotations`, `content_blocks`, `student_content_feedback` (Alembic migration)
+- [ ] `REVIEW_AUTO_APPROVE=true` env var publishes new versions automatically (dev/test only)
 - [ ] Pipeline emits per-unit structured logs (tokens, cost estimate, duration)
 - [ ] Pipeline emits a JSON run summary on completion
 - [ ] Pipeline spend cap: abort if estimated cost exceeds `MAX_PIPELINE_COST_USD`
 - [ ] Content Store populated for at least one grade in English
 - [ ] Backend Content Service endpoints live
+- [ ] Content endpoint guard: `content_subject_version.status = 'published'` AND no active block; return 404 / 403 otherwise
 - [ ] Rate limiting on content endpoints (100 req/min per student JWT)
 - [ ] Entitlement middleware: track `lessons_accessed`, return HTTP 402 after 2 for free tier
 - [ ] `POST /content/{unit_id}/report` endpoint
@@ -439,11 +451,24 @@ These can be higher than in the Free edition because the pipeline runs on a serv
 - [ ] Mobile: "🔬 Experiment" button on SubjectScreen (visible only when 200)
 - [ ] Experiment content cached alongside lesson JSON
 
-### Phase 7 — Admin Dashboard + Analytics
+### Phase 7 — Admin Dashboard + Analytics + Content Review UI
 - [ ] Admin endpoints protected by separate admin JWT role (not student JWT)
+- [ ] `require_permission()` dependency wired to all admin and review endpoints; RBAC enforced
+- [ ] `core/permissions.py` — `ROLE_PERMISSIONS` map complete; school-scope enforcement in each handler
 - [ ] Admin API: content build status, per-unit/language regeneration
 - [ ] `GET /admin/pipeline/status` — last run time, units built/missing/failed
-- [ ] Audit log for all admin actions (who triggered what, when)
+- [ ] Audit log for all admin actions (who triggered what, when); publish/block actions written to `audit_log`
+- [ ] **Content review queue:** `GET /admin/content/review/queue` with status/subject/curriculum filters
+- [ ] **Review session:** `POST .../open`, `POST .../annotate`, `DELETE .../annotations/{id}`
+- [ ] **Dictionary/thesaurus:** `GET /admin/content/dictionary?word=` backed by Datamuse + Merriam-Webster
+- [ ] **Rating:** `POST .../rate` (language_rating 1–5 + content_rating 1–5)
+- [ ] **Approve / reject / regenerate:** `POST .../approve`, `POST .../reject` (with `regenerate: bool`)
+- [ ] Rejection with `regenerate=true` dispatches Celery pipeline task for flagged units
+- [ ] **Publish:** `POST /admin/content/versions/{version_id}/publish` — archives current published version atomically
+- [ ] **Rollback:** `POST /admin/content/versions/{version_id}/rollback` — archives current, restores target
+- [ ] Both publish and rollback invalidate L2 Redis and issue CloudFront CDN invalidation
+- [ ] **Access block:** `POST /admin/content/block`, `DELETE /admin/content/block/{block_id}`; school-scoped and platform-wide
+- [ ] Student marked-text feedback: `GET /admin/content/{unit_id}/feedback/marked` list
 - [ ] Subscription analytics: MRR, churn, conversion
 - [ ] Aggregate analytics: struggle rate per question
 - [ ] Content report review queue: surface units exceeding report threshold

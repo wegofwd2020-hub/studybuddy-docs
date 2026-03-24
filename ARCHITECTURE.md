@@ -623,6 +623,76 @@ stateDiagram-v2
 
 ---
 
+## RBAC System
+
+Role-Based Access Control governs every endpoint. Roles are encoded in the JWT `role` claim. Permissions are a **static in-code mapping** — no DB lookup on the hot path. Scope (school vs platform) is derived from the JWT `school_id` claim present for teacher/school_admin roles.
+
+### Roles and Scopes
+
+| Role | Auth Track | Scope |
+|---|---|---|
+| `student` | Auth0 | Own data only |
+| `teacher` | Auth0 | Their school's data (`school_id` from JWT) |
+| `school_admin` | Auth0 | Their school's data (`school_id` from JWT) |
+| `product_admin` | Local (bcrypt) | Platform-wide |
+| `super_admin` | Local (bcrypt) | Platform-wide |
+| `developer` | Local (bcrypt) | Platform-wide (read + test operations) |
+| `tester` | Local (bcrypt) | Platform-wide (read + limited write for testing) |
+
+### Permission Matrix
+
+Permissions use `resource:action` naming. ✓ = granted · ✓(s) = granted within own school only · — = denied.
+
+| Permission | student | teacher | school_admin | product_admin | super_admin | developer | tester |
+|---|---|---|---|---|---|---|---|
+| `content:read` | ✓ | ✓(s) | ✓(s) | ✓ | ✓ | ✓ | ✓ |
+| `content:feedback` | ✓ | — | — | — | — | — | — |
+| `review:read` | — | ✓(s) | ✓(s) | ✓ | ✓ | ✓ | ✓ |
+| `review:annotate` | — | ✓(s) | ✓(s) | ✓ | ✓ | — | ✓ |
+| `review:rate` | — | ✓(s) | ✓(s) | ✓ | ✓ | — | ✓ |
+| `review:approve` | — | — | ✓(s) | ✓ | ✓ | — | — |
+| `content:publish` | — | — | — | ✓ | ✓ | — | — |
+| `content:rollback` | — | — | — | ✓ | ✓ | — | — |
+| `content:block` | — | — | ✓(s) | ✓ | ✓ | — | — |
+| `content:regenerate` | — | — | — | ✓ | ✓ | — | — |
+| `student:manage` | — | ✓(s) | ✓(s) | ✓ | ✓ | — | — |
+| `school:manage` | — | — | — | ✓ | ✓ | — | — |
+| `admin:manage` | — | — | — | — | ✓ | — | — |
+
+`developer` and `tester` have `review:annotate` / `review:rate` so they can exercise the review workflow in staging without being able to approve or publish.
+
+### Implementation
+
+```python
+# backend/src/core/permissions.py
+
+ROLE_PERMISSIONS: dict[str, set[str]] = {
+    "student":       {"content:read", "content:feedback"},
+    "teacher":       {"content:read", "review:read", "review:annotate",
+                      "review:rate", "student:manage"},
+    "school_admin":  {"content:read", "review:read", "review:annotate",
+                      "review:rate", "review:approve", "content:block",
+                      "student:manage"},
+    "product_admin": {"content:read", "content:publish", "content:rollback",
+                      "content:block", "content:regenerate", "review:read",
+                      "review:annotate", "review:rate", "review:approve",
+                      "student:manage", "school:manage"},
+    "super_admin":   {"*"},   # all permissions
+    "developer":     {"content:read", "review:read", "review:rate"},
+    "tester":        {"content:read", "review:read", "review:rate", "review:annotate"},
+}
+
+def require_permission(permission: str) -> Callable:
+    """FastAPI dependency — raises HTTP 403 if JWT role lacks the permission."""
+    ...
+```
+
+**Scope enforcement:** school-scoped roles (`teacher`, `school_admin`) can only act on resources where `school_id` matches their JWT. The resource's `school_id` is checked inside each endpoint handler — not in a shared middleware — to avoid ambiguity with platform-wide resources (e.g., default curricula).
+
+**No DB round-trips for permission checks.** The `ROLE_PERMISSIONS` map is loaded once at startup. Adding a permission to a role is a code change + deployment, not a DB update.
+
+---
+
 ## API Design
 
 All endpoints require `Authorization: Bearer <jwt>` except `/auth/*`, `/admin/auth/*`, and `/subscription/webhook`.
@@ -717,7 +787,31 @@ Suspending a school cascades: all teachers and students belonging to that school
 | Method | Endpoint | Body | Returns |
 |---|---|---|---|
 | POST | `/content/{unit_id}/report` | `{category, message?}` | `200` |
+| POST | `/content/{unit_id}/feedback/marked` | `{content_type, start_offset, end_offset, marked_text?, feedback_text}` | `200` (student marked-text feedback) |
 | GET | `/app/version` | — | `{min_version, latest_version}` |
+
+### Content Review & Approval
+
+Requires admin or teacher JWT. Permission column references `backend/src/core/permissions.py`.
+
+| Method | Endpoint | Body / Params | Returns | Permission |
+|---|---|---|---|---|
+| GET | `/admin/content/review/queue` | `?curriculum_id=&subject=&status=&page=` | Paginated version list | `review:read` |
+| GET | `/admin/content/review/{version_id}` | — | Version detail + annotations | `review:read` |
+| POST | `/admin/content/review/{version_id}/open` | — | `{review_id}` | `review:annotate` |
+| POST | `/admin/content/review/{version_id}/annotate` | `{unit_id, content_type, start_offset, end_offset, original_text, annotation_type, suggestion_text?}` | `{annotation_id}` | `review:annotate` |
+| DELETE | `/admin/content/review/annotations/{annotation_id}` | — | `200` | `review:annotate` |
+| GET | `/admin/content/dictionary` | `?word=` | `{definitions, synonyms, alternatives}` | `review:read` |
+| POST | `/admin/content/review/{version_id}/rate` | `{language_rating, content_rating, notes?}` | `200` | `review:rate` |
+| POST | `/admin/content/review/{version_id}/approve` | `{notes?}` | `200` | `review:approve` |
+| POST | `/admin/content/review/{version_id}/reject` | `{reason, regenerate: bool}` | `202` if `regenerate=true` | `review:approve` |
+| GET | `/admin/content/versions` | `?curriculum_id=&subject=&page=` | Paginated version history | `review:read` |
+| POST | `/admin/content/versions/{version_id}/publish` | — | `200` (archives current live version) | `content:publish` |
+| POST | `/admin/content/versions/{version_id}/rollback` | — | `200` (archives current; restores this) | `content:rollback` |
+| POST | `/admin/content/block` | `{curriculum_id, subject, school_id?, reason}` | `{block_id}` | `content:block` |
+| DELETE | `/admin/content/block/{block_id}` | — | `200` | `content:block` |
+| GET | `/admin/content/blocks` | `?curriculum_id=&school_id=&page=` | Paginated active blocks | `review:read` |
+| GET | `/admin/content/{unit_id}/feedback/marked` | `?page=` | Paginated student marked-text feedback | `review:read` |
 
 ### Progress
 
@@ -1172,9 +1266,91 @@ erDiagram
         inet ip_address
         timestamp created_at
     }
+    CONTENT_SUBJECT_VERSION {
+        uuid version_id PK
+        uuid curriculum_id FK
+        string subject
+        int grade
+        int version_number "sequential per curriculum+subject"
+        string status "pending|ready_for_review|needs_review|in_review|changes_requested|approved|published|archived|blocked"
+        string units_included "text[] of unit_ids"
+        int alex_warnings_count
+        jsonb alex_report_summary
+        uuid created_by FK
+        uuid reviewed_by FK
+        uuid approved_by FK
+        uuid published_by FK
+        uuid blocked_by FK
+        string block_reason
+        timestamp published_at
+        timestamp archived_at
+        timestamp created_at
+    }
+    CONTENT_REVIEW {
+        uuid review_id PK
+        uuid version_id FK
+        uuid reviewer_id
+        string reviewer_type "product_admin|teacher|school_admin"
+        uuid school_id FK
+        string status "open|submitted|approved|rejected"
+        int language_rating "1–5"
+        int content_rating "1–5"
+        text notes
+        timestamp created_at
+        timestamp submitted_at
+    }
+    CONTENT_ANNOTATION {
+        uuid annotation_id PK
+        uuid version_id FK
+        string unit_id
+        string content_type "lesson|quiz|tutorial|experiment"
+        string lang
+        int start_offset
+        int end_offset
+        string original_text
+        string annotation_type "word_choice|language|content|alex_warning"
+        text suggestion_text
+        jsonb dictionary_options
+        string alex_rule
+        uuid created_by
+        timestamp created_at
+        bool resolved
+        uuid resolved_by
+        timestamp resolved_at
+    }
+    CONTENT_BLOCK {
+        uuid block_id PK
+        uuid curriculum_id FK
+        string subject
+        uuid school_id FK
+        uuid blocked_by
+        text reason
+        timestamp created_at
+        timestamp lifted_at
+        uuid lifted_by
+    }
+    STUDENT_CONTENT_FEEDBACK {
+        uuid feedback_id PK
+        uuid student_id FK
+        string unit_id
+        uuid curriculum_id FK
+        string content_type "lesson|quiz"
+        int start_offset
+        int end_offset
+        text marked_text
+        text feedback_text
+        timestamp created_at
+        bool reviewed
+        uuid reviewed_by
+    }
     STUDENT ||--o{ LESSON_VIEW : "views"
     STUDENT ||--o{ FEEDBACK : "submits"
     STUDENT ||--o{ PARENTAL_CONSENT : "requires (age < 13)"
+    STUDENT ||--o{ STUDENT_CONTENT_FEEDBACK : "marks up"
+    CURRICULUM ||--o{ CONTENT_SUBJECT_VERSION : "has versions"
+    CONTENT_SUBJECT_VERSION ||--o{ CONTENT_REVIEW : "reviewed in"
+    CONTENT_SUBJECT_VERSION ||--o{ CONTENT_ANNOTATION : "annotated in"
+    CURRICULUM ||--o{ CONTENT_BLOCK : "blocked via"
     CURRICULUM_UNIT ||--o{ SESSION : "assessed by"
     CURRICULUM_UNIT ||--o{ LESSON_VIEW : "viewed via"
 ```
@@ -1726,13 +1902,191 @@ CLAUDE_MODEL = "claude-sonnet-4-6"  # pin explicitly — do not use "latest"
 ```
 Changing this value is a deliberate act. After a model upgrade, run the pipeline in a staging Content Store and compare output quality before promoting to production.
 
-### Human Review Gate (Phase 7+)
+### AlexJS Automated Analysis
 
-In Phase 7, the Admin Dashboard exposes a review queue. The pipeline writes to a `staging/` path in the Content Store. An admin promotes units to `live/` after review. Until Phase 7, the pipeline writes directly to `live/`.
+Every Claude-generated text asset passes through [AlexJS](https://alexjs.com/) during the pipeline before being committed to the Content Store. AlexJS detects potentially insensitive language: profanity, gendered phrasing, ableist terms, age-related assumptions — critical for educational content aimed at Grades 5–12.
+
+**Pipeline integration:**
+```python
+# pipeline/alex_checker.py
+import subprocess, json
+
+def run_alex(text: str) -> dict:
+    """Returns AlexJS report dict. Requires Node.js + alex installed."""
+    result = subprocess.run(
+        ["npx", "alex", "--stdin", "--reporter", "json"],
+        input=text, capture_output=True, text=True, timeout=30
+    )
+    return json.loads(result.stdout) if result.stdout else {"messages": []}
+```
+
+AlexJS runs against lesson synopsis, quiz question text, and tutorial text (after markdown stripping). Results are written to `alex_report.json` in the unit's Content Store directory and aggregated into the subject version record.
+
+**Impact on pipeline status:**
+- 0 warnings → `content_subject_version.status: ready_for_review`
+- ≥ 1 warnings → `content_subject_version.status: needs_review` (flagged; requires human attention)
+- The pipeline does **not** abort on AlexJS warnings — all units proceed to the review queue
+
+**Development bypass:** set `REVIEW_AUTO_APPROVE=true` in `.env`. Marks all new subject versions as `published` immediately. Never set in production.
+
+### Human Review Gate
+
+Content is **not accessible to students** until a `content_subject_versions` record with `status = 'published'` exists for that `(curriculum_id, subject)`. The content entitlement check includes this guard. See [Content Review & Approval System](#content-review--approval-system) for the full workflow.
 
 ### Student Content Reports
 
 `POST /content/{unit_id}/report` accepts a report category (`wrong_answer`, `confusing`, `inappropriate`, `other`) and an optional message. Reports are stored in a `content_reports` table. The Admin Dashboard surfaces units exceeding a report threshold.
+
+---
+
+## Content Review & Approval System
+
+### Overview
+
+All AI-generated content passes through a two-stage review before reaching students:
+
+1. **Automated** — AlexJS language analysis during pipeline generation (see [Content Quality Controls](#content-quality-controls))
+2. **Human** — Product Administrators and Teachers/School Admins formally review, annotate, rate, and approve content before it is published
+
+The content entitlement endpoint checks `content_subject_versions.status = 'published'` before serving any content. No content is accessible to students until a subject version has been published.
+
+### Versioning Design
+
+Versioning is at **subject level** within a curriculum (e.g., `"Mathematics"` in `default-2026-g8`). A version encompasses all units belonging to that subject.
+
+**Why subject-level, not unit-level?**
+A subject is a coherent body of learning material. Approving one unit in isolation could expose partially reviewed content. The subject version is the atomic unit of publication — students see "Mathematics v3", not "unit G8-MATH-003 version 2".
+
+**Constraints:**
+- Only **one `published` version** per `(curriculum_id, subject)` at any time
+- Publishing a new version atomically archives the current published version
+- Version numbers are sequential integers per `(curriculum_id, subject)`, starting at 1
+
+### Content Version Lifecycle
+
+```
+[pipeline run]
+      │
+      ▼
+  pending ──(AlexJS clean)──────────────► ready_for_review
+      └─(AlexJS warnings)────────────────► needs_review
+                                                │
+                                      reviewer opens session
+                                                │
+                                                ▼
+                                           in_review
+                                                │
+                            ┌───────────────────┴──────────────────┐
+                        approve                             reject + regenerate
+                            │                                       │
+                            ▼                                       ▼
+                         approved ◄─── pipeline re-runs ─── changes_requested
+                            │
+                    product_admin publishes
+                            │
+                            ▼
+                         published ◄─────────────────── rollback restores
+                            │
+              ┌─────────────┴─────────────┐
+           block                  new version published
+              │                           │
+              ▼                           ▼
+           blocked                     archived
+```
+
+### Review Workflow — Step by Step
+
+1. Pipeline runs → AlexJS analysis → `content_subject_version` record created (`pending` → `ready_for_review` or `needs_review`)
+2. Reviewer opens the admin review queue (`GET /admin/content/review/queue`)
+3. Reviewer opens a review session (`POST /admin/content/review/{version_id}/open`)
+4. Reviewer reads content, annotates words or phrases:
+   - `POST /admin/content/review/{version_id}/annotate` — marks a range with an annotation type
+   - `GET /admin/content/dictionary?word=...` — fetches definitions and synonyms for suggestions
+   - Suggestions are stored in `content_annotations.dictionary_options`
+5. Reviewer submits language and content ratings (`POST .../rate`, each 1–5)
+6. Reviewer decides:
+   - **Approve** → `POST .../approve` → version status → `approved`
+   - **Reject with regeneration** → `POST .../reject` with `regenerate: true` → Celery triggers pipeline re-run for flagged units → version status → `changes_requested`
+7. Product admin publishes the approved version → `POST /admin/content/versions/{version_id}/publish`
+   - Previous published version atomically set to `archived`
+   - Redis `content:{curriculum_id}:{subject}:*` keys invalidated
+   - CloudFront CDN invalidation issued
+
+### Rollback
+
+`POST /admin/content/versions/{version_id}/rollback`:
+- Target version must be `archived`
+- Current `published` version set to `archived`
+- Target version set to `published`
+- L2 Redis cache and CDN invalidated (same as publish)
+
+### Access Block
+
+A block can be applied at any time by a `school_admin`, `product_admin`, or `super_admin`:
+
+```
+POST /admin/content/block  { curriculum_id, subject, school_id?, reason }
+```
+
+- `school_id` set → affects only students of that school
+- `school_id` null → platform-wide, affects all students
+- Multiple blocks can coexist; **any active block denies access**
+- Lift a block with `DELETE /admin/content/block/{block_id}`
+
+Content endpoint guard (pseudo-code):
+```python
+if version.status != "published":
+    raise HTTPException(404)
+if content_block_exists(curriculum_id, subject, school_id=jwt.school_id):
+    raise HTTPException(403, "Content temporarily unavailable")
+```
+
+### Dictionary / Thesaurus API
+
+When a reviewer annotates a word or phrase, the UI calls:
+```
+GET /admin/content/dictionary?word={word}
+```
+
+The backend queries [Datamuse API](https://www.datamuse.com/api/) (free, no key required) for synonyms and [Merriam-Webster Developer API](https://dictionaryapi.com/) for definitions. Results are returned to the UI and stored in `content_annotations.dictionary_options` — no re-fetch needed on page reload.
+
+```json
+{
+  "word": "mankind",
+  "definitions": ["human beings collectively"],
+  "synonyms": ["humanity", "humankind", "people", "human race"],
+  "alternatives": ["people", "humans", "everyone"]
+}
+```
+
+### Student Marked-Text Feedback
+
+Students can select a passage in lesson or quiz content on the mobile app and submit feedback. This feeds into the review queue but does **not** block content access or trigger re-review automatically. A reviewer uses `GET /admin/content/{unit_id}/feedback/marked` to see student-reported passages when preparing an annotation.
+
+### Content Store Changes
+
+AlexJS output is stored alongside generated content:
+```
+{unit_id}/
+  lesson_en.json
+  quiz_set_1_en.json
+  ...
+  alex_report.json          ← AlexJS warnings for all content types in this unit
+  meta.json                 ← extended: alex_warnings_count, review_status, version_id
+```
+
+Extended `meta.json` fields:
+```json
+{
+  "generated_at": "2026-03-23T17:00:00Z",
+  "model": "claude-sonnet-4-6",
+  "content_version": "3",
+  "langs_built": ["en"],
+  "alex_warnings_count": 2,
+  "review_status": "needs_review",
+  "version_id": "uuid"
+}
+```
 
 ---
 
@@ -2438,10 +2792,15 @@ For the Teacher Dashboard, data may be up to 24 hours stale (nightly refresh). A
 ---
 
 ### Phase 2 — Content Pipeline + Delivery (English)
-**Goal:** Lessons and quizzes load instantly from pre-generated English content.
+**Goal:** Lessons and quizzes load instantly from pre-generated English content, gated behind the review workflow.
 
 - Content generation CLI: `build-grade --grade N --lang en` iterates all units, calls Claude, stores JSON
+- AlexJS runs after each unit is generated; results written to `alex_report.json`
+- `content_subject_versions` record created per subject in `ready_for_review` or `needs_review` state
+- PostgreSQL schema: `content_subject_versions`, `content_reviews`, `content_annotations`, `content_blocks`, `student_content_feedback`
+- `REVIEW_AUTO_APPROVE=true` in dev `.env` bypasses the review gate for local development
 - `GET /content/{unit_id}/lesson`, `GET /content/{unit_id}/quiz`
+- Content endpoint guard: serve only if `content_subject_version.status = 'published'` AND no active block
 - Content Store: local filesystem (easily swapped to S3)
 - Mobile app: SubjectScreen and QuizScreen call content endpoints instead of Claude directly
 - Local SQLite cache on device: cache content by `unit_id + content_version + lang`
@@ -2450,7 +2809,7 @@ For the Teacher Dashboard, data may be up to 24 hours stale (nightly refresh). A
 - Set up Redis L2 caching for entitlement and content; nginx rate limiting
 - In-process L1 TTLCache for curriculum tree and JWT keys (cachetools)
 
-**Milestone:** Full lesson + quiz flow with instant English content. No Anthropic API key required by student.
+**Milestone:** Full lesson + quiz flow with instant English content. No Anthropic API key required by student. Content gated by review status (auto-approved in dev).
 
 ---
 
@@ -2517,15 +2876,23 @@ For the Teacher Dashboard, data may be up to 24 hours stale (nightly refresh). A
 
 ---
 
-### Phase 7 — Admin Dashboard + Analytics
-**Goal:** Operator can manage content and see student activity.
+### Phase 7 — Admin Dashboard + Analytics + Content Review UI
+**Goal:** Operator and teachers can manage content, review and approve subject versions, and see student activity.
 
 - Admin API: content build status, regenerate single unit/language, list students, view aggregate scores
+- **RBAC enforcement:** `require_permission()` dependency wired to all admin and review endpoints
+- **Content review queue UI:** list subject versions by status; open review session; annotate words/phrases
+- **Dictionary/thesaurus integration:** `GET /admin/content/dictionary` backed by Datamuse + Merriam-Webster
+- **Rating submission:** language appropriateness (1–5) + content appropriateness (1–5) per version
+- **Approve / reject / regenerate workflow** — rejection with `regenerate=true` dispatches Celery pipeline task
+- **Publish + version history:** `POST /admin/content/versions/{version_id}/publish`; version list with rollback button
+- **Access block UI:** block/unblock any subject at school or platform level
+- **Student marked-text feedback list:** reviewers see student-flagged passages in context
 - Subscription analytics: MRR, churn, conversion rate (free → paid)
 - Identify high-struggle units across all students (questions with >60% wrong rate)
 - Simple web dashboard (FastAPI + Jinja2 templates or React)
 
-**Milestone:** Operator can see which topics students struggle with most, which language content is missing, and trigger targeted content regeneration.
+**Milestone:** Product admin can review AlexJS-flagged content, annotate with word suggestions, approve and publish a subject version. Teacher/school_admin can block content access for their school. Students can access only published, unblocked content.
 
 ---
 

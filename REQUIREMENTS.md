@@ -42,7 +42,7 @@
 |---|---|---|---|---|
 | FR-ACCTMGMT-001 | All user types (student, teacher, school) carry `account_status`: `pending \| active \| suspended \| deleted` | P0 | 1 | proposed |
 | FR-ACCTMGMT-002 | Auth middleware checks Redis `suspended:{id}` set after JWT signature verification; suspended accounts receive `403 Forbidden`; zero DB queries on hot path | P0 | 1 | proposed |
-| FR-ACCTMGMT-003 | On suspension, `id` added to Redis `suspended:{id}` (TTL = max JWT lifetime, 15 min); on reactivation, key deleted from Redis | P0 | 1 | proposed |
+| FR-ACCTMGMT-003 | On suspension, `id` added to Redis `suspended:{id}` with **no TTL**; key is explicitly deleted only on reactivation — a TTL would silently restore access without admin action | P0 | 1 | proposed |
 | FR-ACCTMGMT-004 | On suspension, Celery task calls Auth0 Management API to block the external user (`{"blocked": true}`), preventing re-login; our `account_status` is authoritative | P1 | 1 | proposed |
 | FR-ACCTMGMT-005 | `PATCH /admin/accounts/students/{id}/status` and equivalent teacher/school endpoints; accessible only by `product_admin` or `super_admin` JWT | P0 | 1 | proposed |
 | FR-ACCTMGMT-006 | Suspending a school cascades: all teachers and students of that school suspended via Celery task; each added to Redis `suspended:{id}` set individually | P1 | 1 | proposed |
@@ -50,6 +50,20 @@
 | FR-ACCTMGMT-008 | `DELETE /admin/accounts/students/{id}` soft-deletes the record; Celery task anonymises PII within 30 days per GDPR | P0 | 5 | proposed |
 | FR-ACCTMGMT-009 | Admin account management list endpoints support pagination, `status` filter, `school_id` filter, and free-text `q` search on name/email | P1 | 1 | proposed |
 | FR-ACCTMGMT-010 | Internal admin account lockout: 5 failed login attempts → 15-minute Redis-backed cooldown (same pattern as Auth0 brute-force, applied locally for admin users) | P1 | 1 | proposed |
+
+---
+
+### FR-RBAC: Role-Based Access Control
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| FR-RBAC-001 | Seven distinct roles exist: `student`, `teacher`, `school_admin`, `product_admin`, `super_admin`, `developer`, `tester`; role is encoded in every JWT `role` claim | P0 | 1 | proposed |
+| FR-RBAC-002 | Permissions are defined as a static in-code mapping (`ROLE_PERMISSIONS` dict in `core/permissions.py`); no DB lookup is performed on the hot path for permission checks | P0 | 1 | proposed |
+| FR-RBAC-003 | A `require_permission(permission)` FastAPI dependency is used on every admin and review endpoint; raises HTTP 403 if the role lacks the permission | P0 | 1 | proposed |
+| FR-RBAC-004 | School-scoped roles (`teacher`, `school_admin`) can only act on resources where `school_id` matches their JWT `school_id` claim; scope is enforced inside each endpoint handler | P0 | 1 | proposed |
+| FR-RBAC-005 | `teacher` role may annotate and rate content but not approve or publish; `school_admin` may additionally approve; `product_admin` / `super_admin` may publish and rollback | P0 | 7 | proposed |
+| FR-RBAC-006 | `developer` and `tester` roles have `review:read`, `review:rate`, and (tester only) `review:annotate` permissions for staging use; they cannot approve, publish, or block | P1 | 7 | proposed |
+| FR-RBAC-007 | Changing a role's permissions requires a code change and deployment; no dynamic role/permission management UI is required in Phases 1–11 | P2 | deferred | proposed |
 
 ---
 
@@ -127,6 +141,52 @@
 | FR-PIPE-010 | Pipeline pins to a specific Claude model ID (no implicit latest) | P1 | 2 | proposed |
 | FR-PIPE-011 | Pipeline dry-run mode (`--dry-run`) that validates prompts without writing content | P2 | 2 | proposed |
 | FR-PIPE-012 | Spend cap: pipeline aborts if estimated cost exceeds `MAX_PIPELINE_COST_USD` config | P1 | 2 | proposed |
+
+---
+
+### FR-ALEX: Automated Content Analysis
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| FR-ALEX-001 | AlexJS runs against every Claude-generated text asset (lesson synopsis, quiz questions, tutorial text) during the pipeline, after schema validation | P0 | 2 | proposed |
+| FR-ALEX-002 | AlexJS output written to `alex_report.json` in the unit's Content Store directory; warning count aggregated into `content_subject_versions.alex_warnings_count` | P0 | 2 | proposed |
+| FR-ALEX-003 | Units with AlexJS warnings get `content_subject_version.status = needs_review`; units with zero warnings get `ready_for_review`; pipeline does not abort on warnings | P0 | 2 | proposed |
+| FR-ALEX-004 | AlexJS invoked via subprocess (`npx alex --stdin --reporter json`); Node.js and alex installed in the pipeline environment; timeout of 30 seconds per unit | P1 | 2 | proposed |
+| FR-ALEX-005 | `REVIEW_AUTO_APPROVE=true` env var marks new subject versions as `published` immediately; for dev/test environments only; absent or `false` in production | P1 | 2 | proposed |
+
+---
+
+### FR-CREV: Content Review & Approval
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| FR-CREV-001 | No content is accessible to students until a `content_subject_version` with `status = published` exists for that `(curriculum_id, subject)`; content endpoint raises HTTP 404 otherwise | P0 | 2 | proposed |
+| FR-CREV-002 | Review queue (`GET /admin/content/review/queue`) returns subject versions filterable by `curriculum_id`, `subject`, `status`, and paginated | P0 | 7 | proposed |
+| FR-CREV-003 | A reviewer opens a session (`POST /admin/content/review/{version_id}/open`) that creates a `content_reviews` record; multiple reviewers may open sessions on the same version | P1 | 7 | proposed |
+| FR-CREV-004 | Reviewers can annotate specific words or phrases (`start_offset`, `end_offset`, `original_text`) and supply a replacement suggestion; annotation is linked to a unit + content_type + lang | P0 | 7 | proposed |
+| FR-CREV-005 | `GET /admin/content/dictionary?word=` returns definitions (Merriam-Webster API) and synonyms (Datamuse API); result stored in `content_annotations.dictionary_options` | P1 | 7 | proposed |
+| FR-CREV-006 | Reviewer submits `language_rating` (1–5) and `content_rating` (1–5) per version; both required before approval | P0 | 7 | proposed |
+| FR-CREV-007 | Reviewer approves (`POST .../approve`) or rejects with optional regeneration request (`POST .../reject` with `regenerate: bool`) | P0 | 7 | proposed |
+| FR-CREV-008 | Rejection with `regenerate=true` dispatches a Celery task to re-run the pipeline for flagged units; version status → `changes_requested`; new version created after re-run | P1 | 7 | proposed |
+| FR-CREV-009 | Students can submit marked-text feedback from the mobile UI (`POST /content/{unit_id}/feedback/marked`); submission stores offset + marked text + comment; does not block content access | P1 | 7 | proposed |
+| FR-CREV-010 | Student marked-text feedback is surfaced in the admin review queue alongside content annotations | P2 | 7 | proposed |
+
+---
+
+### FR-CVER: Content Versioning
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| FR-CVER-001 | Versioning is at subject level within a curriculum; a version encompasses all units for that subject | P0 | 2 | proposed |
+| FR-CVER-002 | Version numbers are sequential integers per `(curriculum_id, subject)`, starting at 1; assigned by the backend when a pipeline run creates the version record | P0 | 2 | proposed |
+| FR-CVER-003 | Only one version may have `status = published` per `(curriculum_id, subject)` at any time; publishing a new version atomically archives the previously published version | P0 | 7 | proposed |
+| FR-CVER-004 | Version history is accessible via `GET /admin/content/versions?curriculum_id=&subject=` | P1 | 7 | proposed |
+| FR-CVER-005 | Rollback (`POST /admin/content/versions/{version_id}/rollback`) sets target version (must be `archived`) to `published` and atomically archives the current published version | P1 | 7 | proposed |
+| FR-CVER-006 | Both publish and rollback invalidate L2 Redis cache keys for the affected subject and issue a CloudFront CDN invalidation | P0 | 7 | proposed |
+| FR-CVER-007 | A content block (`POST /admin/content/block`) overrides published status; any active block causes the content endpoint to return HTTP 403; multiple blocks can coexist | P0 | 7 | proposed |
+| FR-CVER-008 | Blocks can be school-scoped (`school_id` set) or platform-wide (`school_id = null`); school-scoped blocks only affect students of that school | P0 | 7 | proposed |
+| FR-CVER-009 | Block can be lifted at any time by the same or higher-privilege user (`DELETE /admin/content/block/{block_id}`) | P0 | 7 | proposed |
+| FR-CVER-010 | Block and publish actions are written to the `audit_log` table | P1 | 7 | proposed |
 
 ---
 
@@ -467,7 +527,10 @@
 | ADR-021 | Feedback summary refreshed hourly (not nightly) | Feedback is time-sensitive — a content error reported by students should be visible to a teacher within the hour, not the next morning | 2026-03-23 | proposed |
 | ADR-022 | External auth (Auth0) for students and teachers; backend issues internal JWT after token exchange | Removes password storage and brute-force defence from our codebase; Auth0 handles MFA, social login, COPPA age-gate, and password reset email delivery; provider is swappable (Cognito, Firebase) by changing the JWKS URL and exchange logic | 2026-03-23 | proposed |
 | ADR-023 | Local bcrypt auth for internal product team; separate `ADMIN_JWT_SECRET` | Internal tooling must not depend on external provider availability; admin credentials are provisioned manually and tightly controlled; separate secret ensures a compromised student JWT cannot be replayed on admin endpoints | 2026-03-23 | proposed |
-| ADR-024 | Suspension check via Redis set in auth middleware; Auth0 block is best-effort sync | Checking `account_status` in PostgreSQL on every request would add a DB query to the hot path; Redis set (15-min TTL matching JWT lifetime) gives instant revocation with zero DB impact; Auth0 block prevents re-login after JWT expires | 2026-03-23 | proposed |
+| ADR-024 | Suspension check via Redis set in auth middleware; Auth0 block is best-effort sync | Checking `account_status` in PostgreSQL on every request would add a DB query to the hot path; Redis set (no TTL, explicitly deleted on reactivation) gives instant revocation with zero DB impact; Auth0 block prevents re-login after JWT expires | 2026-03-23 | proposed |
+| ADR-025 | RBAC via static in-code `ROLE_PERMISSIONS` map, not a DB-backed permission table | Seven roles with fixed permissions are sufficient for Phases 1–11; a DB-backed system adds migration overhead and a DB query per request for no benefit during this phase; the map can be replaced with a DB-backed system later without changing the `require_permission()` call sites | 2026-03-24 | proposed |
+| ADR-026 | AlexJS for automated content language analysis in the pipeline | Detects insensitive language (profanity, gendered phrasing, ableist terms) appropriate for educational content; Node.js tool invoked via subprocess from Python pipeline; warnings feed into the review queue rather than blocking generation, preserving pipeline throughput | 2026-03-24 | proposed |
+| ADR-027 | Content versioning at subject level, not unit level | Approving one unit in isolation could expose partially reviewed content; the subject version is the atomic publication unit; simpler for reviewers (one approval covers all units in a subject); rollback is always a coherent subject snapshot | 2026-03-24 | proposed |
 
 ---
 
