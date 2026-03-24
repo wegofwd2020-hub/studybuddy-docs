@@ -2970,7 +2970,7 @@ def send_push_notification(student_id, fcm_token, title, body, event_type):
 ### Phase 1 — Backend Foundation
 **Goal:** Students can register via Auth0 and browse the curriculum. Internal team can log in locally.
 
-- FastAPI project skeleton with health check
+- FastAPI project skeleton with health check; all routes prefixed `/api/v1/`
 - PostgreSQL schema: `students`, `teachers`, `admin_users`, `sessions`
 - Auth0 tenant configured; JWKS endpoint cached in L1 TTLCache
 - `POST /auth/exchange` (student token exchange), `POST /auth/teacher/exchange`
@@ -3028,8 +3028,8 @@ def send_push_notification(student_id, fcm_token, title, body, event_type):
 
 ---
 
-### Phase 4 — Offline Sync + Multi-language + TTS
-**Goal:** App works on spotty connections; French and Spanish content available; lessons read aloud.
+### Phase 4 — Offline Sync + Multi-language + TTS + Push Notifications
+**Goal:** App works on spotty connections; French and Spanish content available; lessons read aloud; students receive engagement nudges.
 
 - Local SQLite progress event queue on device
 - Sync manager: flush queue on app foreground / network restore
@@ -3041,8 +3041,14 @@ def send_push_notification(student_id, fcm_token, title, body, event_type):
 - Mobile: "🔊 Listen" button on SubjectScreen; downloads and plays MP3; cached for offline
 - Configure CloudFront CDN in front of S3; pre-signed URL generation for audio
 - Cache-Control headers set on S3 objects (lesson JSON: 1 hr, MP3: 24 hr)
+- PostgreSQL schema: `push_tokens`, `notification_preferences`
+- `POST /notifications/token`, `DELETE /notifications/token` — register/unregister FCM token on login/logout
+- `GET /notifications/preferences`, `PUT /notifications/preferences` — student opt-in/opt-out and quiet hours
+- Celery Beat tasks: `check_streak_reminders` (daily), `send_weekly_summary` (Sunday), `check_quiz_nudges` (daily)
+- `send_push_notification` Celery task: respects quiet hours, 2/day global cap, retries on FCM error
+- Global rate limit: maximum 2 push notifications per student per day enforced in `send_push_notification`
 
-**Milestone:** Student can switch to French or Spanish and hear lessons read aloud, even offline after first download.
+**Milestone:** Student can switch to French or Spanish and hear lessons read aloud, even offline after first download. Students who miss a day receive a streak reminder; students who viewed a lesson but skipped the quiz get a nudge after 48 hours.
 
 ---
 
@@ -3093,8 +3099,8 @@ def send_push_notification(student_id, fcm_token, title, body, event_type):
 
 ---
 
-### Phase 8 — School & Teacher Registration + Curriculum Upload
-**Goal:** A school or teacher can register, upload their own STEM curriculum, and trigger content generation for it.
+### Phase 8 — School & Teacher Registration + Curriculum Upload + Academic Year Transitions
+**Goal:** A school or teacher can register, upload their own STEM curriculum, and trigger content generation for it. Annual grade promotion and default content refresh are automated.
 
 - PostgreSQL schema: `schools`, `teachers`, `school_enrolments`, `curricula`, `curriculum_units`
 - `POST /schools/register` — school creates account; auto-approve in Phase 8
@@ -3106,8 +3112,12 @@ def send_push_notification(student_id, fcm_token, title, body, event_type):
 - Pipeline extended: accepts `curriculum_id` parameter; reads units from DB instead of local JSON file
 - Content Store path: `{curriculum_id}/{unit_id}/…` (same layout as default)
 - `GET /curriculum/pipeline/{job_id}/status` — polling endpoint for pipeline progress
+- `GRADE_PROMOTION_DATE` config (`ACADEMIC_YEAR_START` per region: northern `09-01`, southern `01-30`)
+- Celery Beat task `promote_student_grades`: runs on promotion date; increments `student.grade` by 1; invalidates `ent:*` and `cur:*` Redis keys for all affected students
+- Old default curriculum content (`default-{prev_year}-g{grade}`) retained for 30-day grace period; archived after
+- Operator runbook: annual pipeline checklist added to `SCALABILITY.md`; execute before promotion date each year
 
-**Milestone:** A teacher can register, upload a Grade 8 STEM syllabus via XLSX, trigger generation, and receive an email when content is ready.
+**Milestone:** A teacher can register, upload a Grade 8 STEM syllabus via XLSX, trigger generation, and receive an email when content is ready. At the start of the new academic year, students are automatically promoted to the next grade and see the new year's content.
 
 ---
 
