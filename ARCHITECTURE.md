@@ -24,7 +24,7 @@ Who interacts with the system and which external services it depends on.
 graph TB
     subgraph USERS["Actors"]
         STU["🎓 Student\nGrades 5–12\nUses mobile app to\nbrowse lessons and take quizzes"]
-        TCH["👩‍🏫 Teacher / School Admin\nUploads curriculum,\nmanages roster,\nviews class analytics"]
+        TCH["🏫 Teacher / School Admin\nUploads curriculum,\nmanages roster,\nviews class analytics"]
         OPR["🔧 Platform Operator\nManages content pipeline,\nmonitors platform,\nreviews analytics"]
     end
 
