@@ -1468,6 +1468,23 @@ This product serves students in Grades 5–12, which includes children under 13.
 - **Consent at registration:** display a privacy policy link and require explicit acceptance before account creation.
 - **Data retention:** progress records are retained for the lifetime of the account, then anonymised (strip `student_id`) after account deletion.
 
+### FERPA (Family Educational Rights and Privacy Act)
+
+FERPA applies when students are enrolled in schools that receive US federal funding. Quiz scores, lesson-view history, session records, and progress data are **educational records** under FERPA.
+
+**Parental and student rights:**
+- Parents of students under 18 (or eligible students aged 18+) have the right to inspect and review their educational records.
+- Schools must obtain written consent before disclosing educational records to third parties.
+- `GET /student/progress`, `GET /student/dashboard`, and `GET /student/stats` are scoped to the authenticated student's own data only — the JWT `student_id` is the sole authority.
+- Teacher and school_admin access to a student's records is limited to students enrolled in their own school (`school_id` scope from JWT).
+
+**Architecture implications:**
+- `student_id` is never accepted as a query or body parameter on student-facing endpoints — always derived from the verified JWT.
+- Teacher endpoints that return student data (`GET /reports/school/{school_id}/students/*`) enforce `school_id` scope.
+- `audit_log` records all teacher and admin access to student records, satisfying FERPA's access tracking requirement.
+- Student data export (`GET /student/export`) must be supported for parental inspection requests. Implement in Phase 7 as a paginated JSON download of all records for the student.
+- Do not share student progress data with third-party analytics or advertising services.
+
 ### Payment Data
 
 The backend never stores card numbers, CVV, or bank account details. Stripe handles all payment data. The backend stores only `stripe_customer_id` and `stripe_subscription_id` to reference Stripe objects.
@@ -1477,6 +1494,37 @@ The backend never stores card numbers, CVV, or bank account details. Stripe hand
 - Reset tokens are single-use UUIDs stored in Redis with a 1-hour TTL.
 - Consuming a token deletes it immediately.
 - After account lockout, password reset is the only path to re-enable login.
+
+### Accessibility
+
+The platform targets **WCAG 2.1 Level AA** for all student-facing interfaces (mobile app and any web views).
+
+**Visual:**
+- Minimum color contrast ratio: **4.5:1** for normal text, **3:1** for large text (≥ 18pt or ≥ 14pt bold).
+- Do not convey information through color alone — use icons, labels, or patterns alongside color.
+- All text must be resizable up to 200% without loss of content or functionality.
+
+**Motor / Interaction:**
+- All interactive elements must have a minimum touch target of **44 × 44 dp** on Android.
+- No time limits on quizzes without an option to extend (WCAG 2.2.1 Timing Adjustable).
+- Keyboard/D-pad navigable on Android TV and Chrome targets.
+
+**Screen Reader:**
+- All images, icons, and non-text content must have `contentDescription` (Android) or `aria-label` (web).
+- Quiz answer options must be announced with their letter/number and text, not just position.
+- Progress indicators (streak, completion %) must be announced as text, not only rendered visually.
+
+**Audio / Media:**
+- Lesson audio (TTS MP3) must have a text alternative — the lesson `synopsis` text is always shown alongside the audio player.
+- Audio controls must be accessible via screen reader without sight.
+
+**Error Messages:**
+- Student-facing error messages must be plain language (no HTTP codes, stack traces, or internal identifiers).
+- Error messages must be announced by the screen reader automatically (`aria-live="assertive"` on web; `AccessibilityEvent` on Android).
+
+**Implementation notes:**
+- Android: use Jetpack Compose accessibility modifiers; test with TalkBack.
+- Content accessibility is partially enforced at generation time — AlexJS flags language issues; reading level targeting is set in the pipeline prompt (1–2 grades below student grade).
 
 ---
 

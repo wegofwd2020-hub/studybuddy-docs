@@ -417,10 +417,36 @@
 | NFR-COMP-001 | COPPA compliance: collect parental consent for students under 13 before account activation | P0 | 1 | proposed |
 | NFR-COMP-002 | GDPR: honour right-to-erasure request within 30 days (`DELETE /auth/account`) | P0 | 5 | proposed |
 | NFR-COMP-003 | GDPR: data processing disclosure in privacy policy; consent captured at registration | P0 | 1 | proposed |
-| NFR-COMP-004 | Data retention policy: progress records retained for N years then anonymised | P1 | 5 | proposed |
-| NFR-COMP-005 | PII minimisation: collect only name, email, grade, locale; no location, no device ID | P1 | 1 | proposed |
+| NFR-COMP-004 | Data retention policy: progress records retained for account lifetime then anonymised (strip `student_id`) after deletion | P1 | 5 | proposed |
+| NFR-COMP-005 | PII minimisation: collect only name, email, grade, locale; no location, no device ID, no behavioural fingerprinting | P1 | 1 | proposed |
 | NFR-COMP-006 | Stripe handles all payment data; backend never stores card numbers or CVV | P0 | 5 | accepted |
 | NFR-COMP-007 | Password reset tokens expire after 1 hour and are single-use | P0 | 1 | proposed |
+| NFR-COMP-008 | FERPA: quiz scores, lesson-view history, session records, and progress data are educational records; access is scoped to the owning student or their school's teachers/admins | P0 | 1 | proposed |
+| NFR-COMP-009 | FERPA: student educational records must not be shared with third-party analytics or advertising services | P0 | 1 | proposed |
+| NFR-COMP-010 | FERPA: `student_id` is never accepted as a query or body parameter on student-facing endpoints; always derived from the verified JWT | P0 | 1 | proposed |
+| NFR-COMP-011 | FERPA: all teacher and admin access to student records is written to `audit_log` to satisfy access tracking requirements | P0 | 1 | proposed |
+| NFR-COMP-012 | FERPA: `GET /student/export` provides a full JSON download of all records for the student, for parental inspection requests | P1 | 7 | proposed |
+| NFR-COMP-013 | No real student PII in development or test environments; use synthetic data only; CI must not connect to production databases | P0 | 1 | proposed |
+
+---
+
+### NFR-A11Y: Accessibility
+
+| ID | Requirement | Priority | Phase | Status |
+|---|---|---|---|---|
+| NFR-A11Y-001 | All student-facing UI (mobile app and any web views) must target WCAG 2.1 Level AA | P0 | 3 | proposed |
+| NFR-A11Y-002 | Minimum color contrast ratio: 4.5:1 for normal text, 3:1 for large text (≥ 18pt or ≥ 14pt bold) | P0 | 3 | proposed |
+| NFR-A11Y-003 | Text must be resizable up to 200% without loss of content or functionality | P1 | 3 | proposed |
+| NFR-A11Y-004 | All interactive elements must have a minimum touch target of 44 × 44 dp on Android | P1 | 3 | proposed |
+| NFR-A11Y-005 | All images, icons, and non-text content must have `contentDescription` (Android) or `aria-label` (web) | P0 | 3 | proposed |
+| NFR-A11Y-006 | Quiz answer options must be announced by screen readers with option letter/number and full text | P0 | 3 | proposed |
+| NFR-A11Y-007 | Progress indicators (streak, completion %) must be announced as text, not only rendered visually | P1 | 3 | proposed |
+| NFR-A11Y-008 | Lesson audio (TTS) must have a visible text alternative — synopsis text is always shown alongside the audio player | P0 | 4 | proposed |
+| NFR-A11Y-009 | Student-facing error messages must use plain language; no HTTP status codes, stack traces, or internal identifiers visible to students | P0 | 1 | proposed |
+| NFR-A11Y-010 | Error messages must be announced automatically by screen readers (`aria-live="assertive"` on web; `AccessibilityEvent` on Android) | P1 | 3 | proposed |
+| NFR-A11Y-011 | Information must not be conveyed by color alone; icons, labels, or patterns must accompany color coding | P1 | 3 | proposed |
+| NFR-A11Y-012 | Android implementation uses Jetpack Compose accessibility modifiers; tested with TalkBack before each phase release | P1 | 3 | proposed |
+| NFR-A11Y-013 | No time limits on quiz sessions without an option to extend or disable (WCAG 2.2.1) | P1 | 3 | proposed |
 
 ---
 
