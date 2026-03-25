@@ -353,7 +353,7 @@ curl -H "Authorization: Bearer <token>" \
   http://localhost:8000/api/v1/content/G8-MATH-001/lesson
 ```
 
-*Last updated: 2026-03-25 — documentation audit complete after Phase 2*
+*Last updated: 2026-03-25 — documentation audit complete after Phase 2 and Phase 5 complete*
 
 ---
 
@@ -508,5 +508,66 @@ curl -X POST http://localhost:8000/api/v1/analytics/lesson/start \
 | `PUT` | `/api/v1/notifications/preferences` | Student JWT | Update notification opt-in flags |
 | `POST` | `/api/v1/analytics/lesson/start` | Student JWT | Record lesson open; returns `view_id` |
 | `POST` | `/api/v1/analytics/lesson/end` | Student JWT | Record lesson close with duration/flags (fire-and-forget) |
+
+*Last updated: 2026-03-25*
+
+---
+
+## Phase 5 Implementation Log — Subscription + Payments
+
+**Date:** 2026-03-25
+**Branch:** main (snapshot branch created after commit)
+**Tests after phase:** 99 passed, 0 failed (+12 new)
+
+### Files Created
+
+| File | Purpose |
+|---|---|
+| `backend/alembic/versions/0005_phase5_subscriptions.py` | `subscriptions` + `stripe_events` tables; partial index on active subs; unique on `stripe_subscription_id` |
+| `backend/src/subscription/__init__.py` | Package marker |
+| `backend/src/subscription/schemas.py` | Pydantic schemas: `CheckoutRequest`, `CheckoutResponse`, `SubscriptionStatusResponse`, `CancelResponse` |
+| `backend/src/subscription/service.py` | `create_checkout_session`, `cancel_stripe_subscription`, `expire_entitlement_cache`, `already_processed`, `log_stripe_event`, `get_subscription_status`, `activate_subscription`, `update_subscription_status`, `cancel_subscription_db`, `handle_payment_failed`, `cancel_active_subscription_for_student` |
+| `backend/src/subscription/router.py` | `GET /subscription/status`, `POST /subscription/checkout`, `POST /subscription/webhook`, `DELETE /subscription` |
+| `backend/tests/test_subscription.py` | 12 tests: free status, active status, checkout 503/200, webhook signature, dedup, checkout.session.completed, invoice.payment_failed grace, subscription.deleted cancel, cancel 404/200, auth guard |
+| `mobile/src/api/subscription_client.py` | Async HTTP client: `get_subscription_status`, `get_checkout_url`, `cancel_subscription` |
+| `mobile/src/ui/SubscriptionScreen.py` | Full paywall UI: two plan cards (Monthly/Annual), Stripe checkout via system browser, refresh/restore button, back navigation |
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `backend/config.py` | Added `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_MONTHLY_ID`, `STRIPE_PRICE_ANNUAL_ID` (all Optional[str]) |
+| `backend/main.py` | Registered `subscription_router` at `/api/v1` |
+| `backend/src/auth/router.py` | `DELETE /auth/account` now cancels active Stripe subscription before GDPR erasure (best-effort, never blocks deletion) |
+
+### Key Decisions
+
+- **Stripe webhook signature always verified first** — `stripe.Webhook.construct_event()` called before any processing; 400 on failure (CLAUDE.md rule #8). Webhook does NOT use `get_current_student` — authenticated by signature only.
+- **Idempotent webhook handler** — `stripe_events` table with `stripe_event_id` as PRIMARY KEY; `already_processed()` checked before dispatch; `log_stripe_event()` uses `ON CONFLICT DO NOTHING` (CLAUDE.md rule #9).
+- **3-day grace period on payment failure** — `invoice.payment_failed` sets `status='past_due'` and `grace_period_end = NOW() + 3 days`. Student retains content access until grace period ends (no code changes needed — entitlement service reads `valid_until` which is updated to `grace_period_end`).
+- **Entitlement cache expired on every state change** — `expire_entitlement_cache(redis, student_id)` called in `activate_subscription`, `update_subscription_status`, `cancel_subscription_db`, and `handle_payment_failed`. Next content request re-fetches entitlement from DB.
+- **Mobile never holds Stripe keys** — `mobile/src/api/subscription_client.py` calls backend REST only; checkout URL is fetched from backend and opened in system browser (`webbrowser.open()`).
+- **Stripe subscription cancelled before GDPR erasure** — `DELETE /auth/account` attempts Stripe cancellation first; on failure it logs a warning and proceeds with GDPR deletion (subscription is orphaned in Stripe, acceptable trade-off vs blocking deletion).
+- **Webhook returns 200 after signature verification even on handler errors** — processing errors are logged to `stripe_events` with `outcome='error'` but HTTP response is still 200 so Stripe does not retry unnecessarily.
+
+### New Endpoints (Phase 5)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/subscription/status` | Student JWT | Current plan + status + valid_until + lessons_accessed |
+| `POST` | `/api/v1/subscription/checkout` | Student JWT | Create Stripe Checkout Session; returns `checkout_url` |
+| `POST` | `/api/v1/subscription/webhook` | Stripe signature | Handles: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed` |
+| `DELETE` | `/api/v1/subscription` | Student JWT | Cancel at period end; student retains access until `current_period_end` |
+
+### Stripe Webhook Setup (production)
+
+```bash
+stripe listen --forward-to localhost:8000/api/v1/subscription/webhook
+
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_MONTHLY_ID=price_...
+STRIPE_PRICE_ANNUAL_ID=price_...
+```
 
 *Last updated: 2026-03-25*
