@@ -1,0 +1,141 @@
+---
+# docs/prometheus/alerts.yml
+#
+# Alertmanager rules for StudyBuddy OnDemand.
+# Deploy with: kubectl apply -f docs/prometheus/alerts.yml
+# or mount into the Alertmanager config directory.
+#
+# Notification routing (configure in alertmanager.yml):
+#   critical → PagerDuty
+#   high     → Slack #studybuddy-alerts
+#   medium   → Slack #studybuddy-alerts
+#   pipeline → AWS SES email
+#   payments → AWS SES email
+
+groups:
+
+  # ── Critical: immediate page ─────────────────────────────────────────────────
+  - name: critical
+    rules:
+
+      - alert: APIDown
+        expr: up{job="studybuddy-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "StudyBuddy API is down"
+          description: "The backend API has been unreachable for more than 1 minute. Instance: {{ $labels.instance }}"
+          runbook: "https://wiki.studybuddy.internal/runbooks/api-down"
+
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(sb_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(sb_requests_total[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Error rate exceeds 5%"
+          description: "5xx error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+          runbook: "https://wiki.studybuddy.internal/runbooks/high-error-rate"
+
+      - alert: DBPoolExhausted
+        expr: sb_db_pool_connections{state="free"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Database connection pool exhausted"
+          description: "No free asyncpg connections for 2+ minutes. All {{ $value }} connections are in use."
+          runbook: "https://wiki.studybuddy.internal/runbooks/db-pool-exhausted"
+
+  # ── High: Slack alert + possible page ────────────────────────────────────────
+  - name: high
+    rules:
+
+      - alert: HighP95Latency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(sb_request_duration_seconds_bucket{path!="/health",path!="/metrics"}[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: high
+          team: platform
+        annotations:
+          summary: "p95 API latency exceeds 500ms"
+          description: "p95 response time is {{ $value | humanizeDuration }} over the last 5 minutes."
+
+      - alert: RedisHighMemory
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.80
+        for: 5m
+        labels:
+          severity: high
+          team: platform
+        annotations:
+          summary: "Redis memory usage above 80%"
+          description: "Redis is using {{ $value | humanizePercentage }} of its maximum memory. Risk of key eviction."
+          runbook: "https://wiki.studybuddy.internal/runbooks/redis-memory"
+
+      - alert: PipelineFailed
+        expr: |
+          increase(pipeline_unit_failures_total[1h]) > 5
+        for: 0m
+        labels:
+          severity: high
+          team: pipeline
+        annotations:
+          summary: "Content pipeline has more than 5 unit failures in the last hour"
+          description: "{{ $value }} unit failures detected. Check pipeline logs."
+          runbook: "https://wiki.studybuddy.internal/runbooks/pipeline-failures"
+
+  # ── Medium: Slack notification ────────────────────────────────────────────────
+  - name: medium
+    rules:
+
+      - alert: LowContentCacheHitRate
+        expr: |
+          (
+            sum(rate(sb_requests_total{path=~"/api/v1/content/.*",status="200"}[10m]))
+            /
+            sum(rate(sb_requests_total{path=~"/api/v1/content/.*"}[10m]))
+          ) < 0.70
+        for: 10m
+        labels:
+          severity: medium
+          team: platform
+        annotations:
+          summary: "Content cache hit rate below 70%"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}. Redis L2 may be cold or undersized."
+
+      - alert: FreeTierConversionAnomaly
+        expr: |
+          (
+            sum(rate(sb_requests_total{status="402"}[1h]))
+            /
+            sum(rate(sb_requests_total{path=~"/api/v1/content/.*",status=~"2.."}[1h]))
+          ) > 0.50
+        for: 30m
+        labels:
+          severity: medium
+          team: product
+        annotations:
+          summary: "Unusually high free-tier paywall rate"
+          description: "More than 50% of content requests are hitting the paywall (HTTP 402). Check entitlement config."
+
+      - alert: CeleryQueueDepthHigh
+        expr: celery_queue_length{queue="pipeline"} > 100
+        for: 15m
+        labels:
+          severity: medium
+          team: pipeline
+        annotations:
+          summary: "Pipeline Celery queue depth exceeds 100"
+          description: "{{ $value }} tasks queued in the pipeline queue. Workers may be backed up."
