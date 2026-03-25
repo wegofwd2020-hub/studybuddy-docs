@@ -354,3 +354,80 @@ curl -H "Authorization: Bearer <token>" \
 ```
 
 *Last updated: 2026-03-25 — documentation audit complete after Phase 2*
+
+---
+
+### Phase 3 — Progress Tracking (2026-03-25)
+
+**Branch:** `main` (branched snapshot `20260325_1608`)
+**Tests:** 73/73 passing
+
+**Files created:**
+- `backend/alembic/versions/0003_phase3_progress_schema.py` — migration: `progress_sessions`, `progress_answers`, `lesson_views` tables + `mv_student_curriculum_progress` materialized view
+- `backend/src/progress/__init__.py` — module init
+- `backend/src/progress/schemas.py` — Pydantic request/response schemas for all progress endpoints
+- `backend/src/progress/service.py` — DB logic: `create_session`, `record_answer_sync`, `end_session`, `get_raw_history`; `attempt_number` computed server-side
+- `backend/src/progress/router.py` — `POST /progress/session`, `POST /progress/session/{id}/answer`, `POST /progress/session/{id}/end`, `GET /progress/student`
+- `backend/src/student/__init__.py` — module init
+- `backend/src/student/schemas.py` — Pydantic schemas for dashboard, progress map, stats
+- `backend/src/student/service.py` — aggregation logic: dashboard (L2 Redis cached 60s), progress map (mat. view), stats (with daily_activity); streak read/write helpers
+- `backend/src/student/router.py` — `GET /student/dashboard`, `GET /student/progress`, `GET /student/stats?period=7d|30d|all`
+- `backend/tests/test_progress.py` — 9 progress endpoint tests
+- `backend/tests/test_student.py` — 12 student aggregate endpoint tests
+- `mobile/src/api/progress_client.py` — async HTTP client for all progress + student endpoints
+- `mobile/src/ui/ResultScreen.py` — result screen showing backend-confirmed score; never computes score client-side
+- `mobile/src/ui/ProgressDashboardScreen.py` — streak badge, subject rings, next unit card, recent activity
+- `mobile/src/ui/CurriculumMapScreen.py` — full curriculum map with colour-coded status badges; tapping navigates to lesson
+- `mobile/src/ui/StatsScreen.py` — period picker (7d/30d/all), stat cards, daily activity breakdown
+
+**Files modified:**
+- `backend/src/auth/tasks.py` — added `write_progress_answer_task` (fire-and-forget answer write), `update_streak_task` (Redis streak update), `refresh_progress_view_task` (REFRESH MATERIALIZED VIEW CONCURRENTLY + dashboard cache invalidation)
+- `backend/main.py` — registered `progress_router` and `student_router`
+
+**Bug fixes applied during implementation:**
+- `curriculum_units` has no `grade` column — fixed service to JOIN `curricula` table to obtain grade
+- `DATE(started_at)` in index expression rejected by PostgreSQL (requires IMMUTABLE) — changed to index on `started_at` directly
+- `db_conn` fixture uses uncommitted transaction not visible to the client pool — fixed test helpers to use `client._transport.app.state.pool` for student inserts
+
+**Key decisions made during Phase 3:**
+- Answer writes are fire-and-forget Celery tasks; `POST /progress/session/{id}/answer` returns `200 OK` before DB write (CLAUDE.md rule: progress writes never delay client)
+- `attempt_number` is always `COUNT(completed sessions) + 1` server-side — client-supplied values are ignored
+- Streak stored as JSON in Redis (`streak:{student_id}`); never recomputed from raw sessions on request (D-17)
+- `QUIZ_PASS_THRESHOLD = 0.60` (≥60% score required to mark unit `completed`)
+- `REFRESH MATERIALIZED VIEW CONCURRENTLY` used so reads aren't blocked during refresh
+- Dashboard cached 60s at L2 Redis; invalidated on every `POST /progress/session/{id}/end`
+
+**How to run:**
+```bash
+./dev_start.sh
+```
+
+**How to test:**
+```bash
+./dev_start.sh test    # 73/73 passing
+```
+
+**Manual testing via Swagger:**
+```bash
+# 1. Get a student JWT (POST /api/v1/auth/exchange)
+# 2. Start a session
+curl -X POST http://localhost:8000/api/v1/progress/session \
+  -H "Authorization: Bearer <token>" \
+  -d '{"unit_id":"G8-MATH-001","curriculum_id":"default-2026-g8"}'
+# 3. Record answers, end session, view dashboard
+curl http://localhost:8000/api/v1/student/dashboard -H "Authorization: Bearer <token>"
+```
+
+**New endpoints added in Phase 3:**
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/progress/session` | Student JWT | Open a quiz session; returns `attempt_number` (server-computed) |
+| `POST` | `/api/v1/progress/session/{id}/answer` | Student JWT | Record answer (fire-and-forget Celery write) |
+| `POST` | `/api/v1/progress/session/{id}/end` | Student JWT | Close session; compute `score` + `passed`; triggers streak + view refresh |
+| `GET` | `/api/v1/progress/student` | Student JWT | Full raw history (sessions + answers), newest first |
+| `GET` | `/api/v1/student/dashboard` | Student JWT | Aggregated dashboard card (streak, subject %, next unit, recent activity); Redis-cached 60s |
+| `GET` | `/api/v1/student/progress` | Student JWT | Curriculum map with per-unit status badges (`not_started` / `in_progress` / `needs_retry` / `completed`) |
+| `GET` | `/api/v1/student/stats` | Student JWT | Usage stats for `?period=7d\|30d\|all`; includes `daily_activity[]` and streak counters |
+
+*Last updated: 2026-03-25*
