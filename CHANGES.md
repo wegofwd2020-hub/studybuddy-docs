@@ -218,6 +218,52 @@ Tracks all decisions, design changes, and implementation milestones.
 - Parental consent age-gate: `upsert_student` now sets `account_status='active'` for non-under-13 students (DB default was `pending`); exchange endpoint blocks `pending` with 403 `account_pending`
 - `dev_start.sh`: port conflict detection, dedicated test DB on port 5433, env var isolation before pytest
 
+**How to run:**
+```bash
+./dev_start.sh          # start server → http://localhost:8000/api/docs
+./dev_start.sh stop     # stop containers
+./dev_start.sh reset    # wipe DB and start fresh
+```
+
+**How to test:**
+```bash
+./dev_start.sh test     # runs 38/38 automated tests (no API key or Auth0 needed)
+```
+
+**Endpoints available after Phase 1:**
+
+| Endpoint | Auth required | Notes |
+|---|---|---|
+| `GET /health` | No | DB + Redis live check |
+| `GET /metrics` | Bearer token | `METRICS_TOKEN` from `.env` |
+| `GET /api/v1/curriculum/grades` | Student JWT | Lists grades 5–12 |
+| `GET /api/v1/curriculum/grade/{grade}` | Student JWT | Subjects + units for a grade |
+| `POST /api/v1/auth/exchange` | Auth0 id_token | Issues internal JWT (student) |
+| `POST /api/v1/auth/teacher/exchange` | Auth0 id_token | Issues internal JWT (teacher) |
+| `POST /api/v1/auth/refresh` | Refresh token | New access JWT |
+| `POST /api/v1/auth/logout` | Refresh token | Invalidates session |
+| `POST /api/v1/auth/forgot-password` | None | Always returns 200 |
+| `PATCH /api/v1/student/profile` | Student JWT | Update name/grade/locale |
+| `DELETE /api/v1/auth/account` | Student JWT | GDPR deletion (async) |
+| `POST /api/v1/admin/auth/login` | Email + password | Admin JWT (bcrypt) |
+| `PATCH /api/v1/admin/accounts/students/{id}/status` | Admin JWT | Suspend/reactivate |
+| `PATCH /api/v1/admin/accounts/teachers/{id}/status` | Admin JWT | Suspend/reactivate |
+| `PATCH /api/v1/admin/accounts/schools/{id}/status` | Admin JWT | Suspend/cascade |
+
+**Generate a test student JWT (no Auth0 needed):**
+```bash
+source venv/bin/activate && cd backend
+python -c "
+from src.auth.service import create_internal_jwt
+from config import settings
+token = create_internal_jwt(
+    {'student_id': '00000000-0000-0000-0000-000000000001',
+     'grade': 8, 'locale': 'en', 'role': 'student', 'account_status': 'active'},
+    settings.JWT_SECRET, settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+print(token)
+"
+```
+
 ---
 
 ### Phase 2 — Content Pipeline + Delivery (2026-03-25)
@@ -262,5 +308,49 @@ Tracks all decisions, design changes, and implementation milestones.
 - TTS is optional: if no TTS provider configured, MP3 files are simply not generated; content endpoints still serve lesson JSON
 - `resolve_curriculum_id` defaults to `default-2026-g{grade}` based on JWT grade (school enrolment resolver added in Phase 9)
 - Audio endpoint returns local path URL in dev (`/static/content/...`), S3 pre-signed URL in production — same interface to mobile client
+
+**How to run:**
+```bash
+./dev_start.sh          # start server → http://localhost:8000/api/docs
+```
+
+**How to test:**
+```bash
+./dev_start.sh test     # runs 52/52 automated tests (no API key needed)
+```
+
+**Run the content pipeline (requires Anthropic API key):**
+```bash
+source venv/bin/activate
+export ANTHROPIC_API_KEY=sk-ant-...
+export CONTENT_STORE_PATH=./data/content_store
+export REVIEW_AUTO_APPROVE=true        # auto-publish in dev (skips review queue)
+
+python pipeline/seed_default.py --year 2026          # seed curricula into DB
+python pipeline/build_grade.py --grade 8 --lang en   # generate Grade 8 English content
+python pipeline/build_unit.py \                      # regenerate one unit
+  --curriculum-id default-2026-g8 \
+  --unit G8-MATH-001 --lang en --force
+```
+
+**New endpoints available after Phase 2:**
+
+| Endpoint | Auth | Notes |
+|---|---|---|
+| `GET /api/v1/content/{unit_id}/lesson` | Student JWT | 404 if unpublished; 402 after 2 lessons (free tier) |
+| `GET /api/v1/content/{unit_id}/quiz` | Student JWT | 8 questions; rotates sets 1→2→3→1 per student |
+| `GET /api/v1/content/{unit_id}/tutorial` | Student JWT | Remediation content |
+| `GET /api/v1/content/{unit_id}/experiment` | Student JWT | 404 if unit has no lab |
+| `GET /api/v1/content/{unit_id}/lesson/audio` | Student JWT | Returns URL (never raw bytes) |
+| `POST /api/v1/content/{unit_id}/report` | Student JWT | Flag problematic content |
+| `POST /api/v1/content/{unit_id}/feedback/marked` | Student JWT | Annotate content |
+| `GET /api/v1/app/version` | Student JWT | `{min_version, latest_version}` |
+
+**Verify content is being served (after pipeline run):**
+```bash
+# Generate a student JWT then call the lesson endpoint
+curl -H "Authorization: Bearer <token>" \
+  http://localhost:8000/api/v1/content/G8-MATH-001/lesson
+```
 
 *Last updated: 2026-03-25*
