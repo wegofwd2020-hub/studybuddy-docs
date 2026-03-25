@@ -571,3 +571,36 @@ STRIPE_PRICE_ANNUAL_ID=price_...
 ```
 
 *Last updated: 2026-03-25*
+
+---
+
+## Phase 6 Implementation Log — Experiment Visualization
+
+**Date:** 2026-03-25
+**Branch:** main (snapshot branch created after commit)
+**Tests after phase:** 100 passed, 0 failed (+1 new)
+
+### Files Created
+
+| File | Purpose |
+|---|---|
+| `mobile/src/ui/ExperimentScreen.py` | Step-by-step lab experiment screen: title, materials, safety notes, numbered steps with expected observations, reflection questions, conclusion prompt |
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `mobile/src/api/content_client.py` | Added `get_experiment(unit_id, token)` — returns experiment JSON; raises 404 for non-lab units |
+| `mobile/src/ui/SubjectScreen.py` | Added "🔬 Experiment" button (hidden by default); `_probe_experiment_async()` called on enter; experiment JSON cached in LocalCache; `experiment_viewed` flag passed in analytics on leave |
+| `backend/tests/test_content.py` | Added `test_experiment_returns_200_for_lab_unit` |
+
+### Key Decisions
+
+- **Experiment button hidden until probed** — `_probe_experiment_async()` fires on `on_enter`. Button only becomes visible (`opacity=1`, `disabled=False`) after backend returns HTTP 200. HTTP 404 silently keeps button hidden (non-lab unit).
+- **Experiment cached in `LocalCache`** — uses `content_type="experiment"`, same keying as lesson (`unit_id, curriculum_id, lang, content_version`). Cache is checked before network call; populated after first successful fetch.
+- **`experiment_viewed` flag in analytics** — `SubjectScreen.on_leave` passes `experiment_viewed=self._experiment_viewed` into the EventQueue payload. Flag is set to `True` only when user actually taps the button and navigates to `ExperimentScreen`.
+- **No new Alembic migration** — experiment endpoint was already implemented in Phase 2. Phase 6 is purely mobile UI + client probe logic + caching.
+- **Backend unchanged** — `GET /content/{unit_id}/experiment` was already complete with entitlement gating, L2 Redis caching, and published/block guards.
+- **ExperimentScreen receives data from SubjectScreen** — never makes its own network call; data is passed via `set_experiment(data)` before navigation, keeping the experiment screen fast and cache-aware.
+
+*Last updated: 2026-03-25*
