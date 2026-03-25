@@ -353,4 +353,4 @@ curl -H "Authorization: Bearer <token>" \
   http://localhost:8000/api/v1/content/G8-MATH-001/lesson
 ```
 
-*Last updated: 2026-03-25*
+*Last updated: 2026-03-25 — documentation audit complete after Phase 2*

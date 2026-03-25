@@ -21,35 +21,35 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-AUTH-001 | Students and teachers authenticate via external provider (Auth0); backend issues internal JWT after token exchange | P0 | 1 | proposed |
-| FR-AUTH-002 | `POST /auth/exchange` accepts Auth0 `id_token`, verifies against JWKS (L1-cached), upserts student record, returns internal JWT + refresh token | P0 | 1 | proposed |
-| FR-AUTH-003 | `POST /auth/teacher/exchange` — same pattern; issues `{teacher_id, school_id, role}` JWT | P0 | 1 | proposed |
-| FR-AUTH-004 | Internal JWT payload: `{student_id, grade, locale, role, exp}` (student) or `{teacher_id, school_id, role, exp}` (teacher); locale always from DB record, never from Auth0 token | P0 | 1 | proposed |
-| FR-AUTH-005 | `POST /auth/refresh` exchanges refresh token (Redis, 30-day TTL) for new internal JWT; no Auth0 call required | P0 | 1 | proposed |
-| FR-AUTH-006 | `POST /auth/forgot-password` calls Auth0 Management API to trigger password reset email; always returns 200; no reset tokens stored in our DB for external-auth users | P0 | 1 | proposed |
-| FR-AUTH-007 | Email verification and brute-force protection delegated to Auth0; no local implementation required for students/teachers | P0 | 1 | proposed |
-| FR-AUTH-008 | Internal product team (developer, tester, product_admin, super_admin) authenticate via `POST /admin/auth/login` with bcrypt-verified local credentials; `ADMIN_JWT_SECRET` is separate from student/teacher secrets | P0 | 1 | proposed |
-| FR-AUTH-009 | `POST /admin/auth/forgot-password` stores one-time reset token in Redis (TTL 1 hr); `POST /admin/auth/reset-password` validates and sets new bcrypt hash | P0 | 1 | proposed |
-| FR-AUTH-010 | No password hash stored for students or teachers; `password_hash` column absent from `students` and `teachers` tables | P0 | 1 | proposed |
-| FR-AUTH-011 | Auth0 JWKS cached in L1 TTLCache (24-hr TTL); JWKS refresh triggered on `kid` mismatch; never fetched on every request | P1 | 1 | proposed |
-| FR-AUTH-012 | Parental consent flow for students under 13 (COPPA): Auth0 blocks signup under-13; consent collected externally before account activation | P0 | 1 | proposed |
-| FR-AUTH-013 | `DELETE /auth/account` deletes student PII and queues Celery task to delete Auth0 user record (GDPR) | P0 | 5 | proposed |
-| FR-AUTH-014 | Student profile update: `PATCH /student/profile` (name, locale, grade) updates our DB record; locale change invalidates cached JWT content | P1 | 3 | proposed |
+| FR-AUTH-001 | Students and teachers authenticate via external provider (Auth0); backend issues internal JWT after token exchange | P0 | 1 | implemented |
+| FR-AUTH-002 | `POST /auth/exchange` accepts Auth0 `id_token`, verifies against JWKS (L1-cached), upserts student record, returns internal JWT + refresh token | P0 | 1 | implemented |
+| FR-AUTH-003 | `POST /auth/teacher/exchange` — same pattern; issues `{teacher_id, school_id, role}` JWT | P0 | 1 | implemented |
+| FR-AUTH-004 | Internal JWT payload: `{student_id, grade, locale, role, exp}` (student) or `{teacher_id, school_id, role, exp}` (teacher); locale always from DB record, never from Auth0 token | P0 | 1 | implemented |
+| FR-AUTH-005 | `POST /auth/refresh` exchanges refresh token (Redis, 30-day TTL) for new internal JWT; no Auth0 call required | P0 | 1 | implemented |
+| FR-AUTH-006 | `POST /auth/forgot-password` calls Auth0 Management API to trigger password reset email; always returns 200; no reset tokens stored in our DB for external-auth users | P0 | 1 | implemented |
+| FR-AUTH-007 | Email verification and brute-force protection delegated to Auth0; no local implementation required for students/teachers | P0 | 1 | implemented |
+| FR-AUTH-008 | Internal product team (developer, tester, product_admin, super_admin) authenticate via `POST /admin/auth/login` with bcrypt-verified local credentials; `ADMIN_JWT_SECRET` is separate from student/teacher secrets | P0 | 1 | implemented |
+| FR-AUTH-009 | `POST /admin/auth/forgot-password` stores one-time reset token in Redis (TTL 1 hr); `POST /admin/auth/reset-password` validates and sets new bcrypt hash | P0 | 1 | implemented |
+| FR-AUTH-010 | No password hash stored for students or teachers; `password_hash` column absent from `students` and `teachers` tables | P0 | 1 | implemented |
+| FR-AUTH-011 | Auth0 JWKS cached in L1 TTLCache (24-hr TTL); JWKS refresh triggered on `kid` mismatch; never fetched on every request | P1 | 1 | implemented |
+| FR-AUTH-012 | Parental consent flow for students under 13 (COPPA): Auth0 blocks signup under-13; consent collected externally before account activation | P0 | 1 | implemented |
+| FR-AUTH-013 | `DELETE /auth/account` deletes student PII and queues Celery task to delete Auth0 user record (GDPR) | P0 | 5 | implemented |
+| FR-AUTH-014 | Student profile update: `PATCH /student/profile` (name, locale, grade) updates our DB record; locale change invalidates cached JWT content | P1 | 3 | implemented |
 
 ### FR-ACCTMGMT: Account Management
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-ACCTMGMT-001 | All user types (student, teacher, school) carry `account_status`: `pending \| active \| suspended \| deleted` | P0 | 1 | proposed |
-| FR-ACCTMGMT-002 | Auth middleware checks Redis `suspended:{id}` set after JWT signature verification; suspended accounts receive `403 Forbidden`; zero DB queries on hot path | P0 | 1 | proposed |
-| FR-ACCTMGMT-003 | On suspension, `id` added to Redis `suspended:{id}` with **no TTL**; key is explicitly deleted only on reactivation — a TTL would silently restore access without admin action | P0 | 1 | proposed |
-| FR-ACCTMGMT-004 | On suspension, Celery task calls Auth0 Management API to block the external user (`{"blocked": true}`), preventing re-login; our `account_status` is authoritative | P1 | 1 | proposed |
-| FR-ACCTMGMT-005 | `PATCH /admin/accounts/students/{id}/status` and equivalent teacher/school endpoints; accessible only by `product_admin` or `super_admin` JWT | P0 | 1 | proposed |
-| FR-ACCTMGMT-006 | Suspending a school cascades: all teachers and students of that school suspended via Celery task; each added to Redis `suspended:{id}` set individually | P1 | 1 | proposed |
+| FR-ACCTMGMT-001 | All user types (student, teacher, school) carry `account_status`: `pending \| active \| suspended \| deleted` | P0 | 1 | implemented |
+| FR-ACCTMGMT-002 | Auth middleware checks Redis `suspended:{id}` set after JWT signature verification; suspended accounts receive `403 Forbidden`; zero DB queries on hot path | P0 | 1 | implemented |
+| FR-ACCTMGMT-003 | On suspension, `id` added to Redis `suspended:{id}` with **no TTL**; key is explicitly deleted only on reactivation — a TTL would silently restore access without admin action | P0 | 1 | implemented |
+| FR-ACCTMGMT-004 | On suspension, Celery task calls Auth0 Management API to block the external user (`{"blocked": true}`), preventing re-login; our `account_status` is authoritative | P1 | 1 | implemented |
+| FR-ACCTMGMT-005 | `PATCH /admin/accounts/students/{id}/status` and equivalent teacher/school endpoints; accessible only by `product_admin` or `super_admin` JWT | P0 | 1 | implemented |
+| FR-ACCTMGMT-006 | Suspending a school cascades: all teachers and students of that school suspended via Celery task; each added to Redis `suspended:{id}` set individually | P1 | 1 | implemented |
 | FR-ACCTMGMT-007 | Schools and teachers (school_admin role) can suspend/reactivate their own students and teachers via `PATCH /schools/{school_id}/students/{id}/status` and `PATCH /schools/{school_id}/teachers/{id}/status`; cannot suspend students belonging to other schools | P1 | 8 | proposed |
 | FR-ACCTMGMT-008 | `DELETE /admin/accounts/students/{id}` soft-deletes the record; Celery task anonymises PII within 30 days per GDPR | P0 | 5 | proposed |
 | FR-ACCTMGMT-009 | Admin account management list endpoints support pagination, `status` filter, `school_id` filter, and free-text `q` search on name/email | P1 | 1 | proposed |
-| FR-ACCTMGMT-010 | Internal admin account lockout: 5 failed login attempts → 15-minute Redis-backed cooldown (same pattern as Auth0 brute-force, applied locally for admin users) | P1 | 1 | proposed |
+| FR-ACCTMGMT-010 | Internal admin account lockout: 5 failed login attempts → 15-minute Redis-backed cooldown (same pattern as Auth0 brute-force, applied locally for admin users) | P1 | 1 | implemented |
 
 ---
 
@@ -71,9 +71,9 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-CURR-001 | `GET /curriculum` returns list of available grades | P0 | 1 | accepted |
-| FR-CURR-002 | `GET /curriculum/{grade}` returns full subject + unit tree for grade | P0 | 1 | accepted |
-| FR-CURR-003 | Backend discovers grades from `data/grade*_stem.json` filenames (no hardcoded grade list) | P0 | 1 | accepted |
+| FR-CURR-001 | `GET /curriculum` returns list of available grades | P0 | 1 | implemented |
+| FR-CURR-002 | `GET /curriculum/{grade}` returns full subject + unit tree for grade | P0 | 1 | implemented |
+| FR-CURR-003 | Backend discovers grades from `data/grade*_stem.json` filenames (no hardcoded grade list) | P0 | 1 | implemented |
 
 ---
 
@@ -81,15 +81,15 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-CONT-001 | `GET /content/{unit_id}/lesson` returns lesson JSON in student locale | P0 | 2 | accepted |
+| FR-CONT-001 | `GET /content/{unit_id}/lesson` returns lesson JSON in student locale | P0 | 2 | implemented |
 | FR-CONT-002 | `GET /content/{unit_id}/lesson/audio` returns signed URL or stream for MP3 | P0 | 4 | accepted |
-| FR-CONT-003 | `GET /content/{unit_id}/quiz` returns one quiz set (8 questions, rotated) in student locale | P0 | 2 | accepted |
-| FR-CONT-004 | `GET /content/{unit_id}/tutorial` returns remediation content in student locale | P1 | 2 | accepted |
-| FR-CONT-005 | `GET /content/{unit_id}/experiment` returns experiment JSON or HTTP 404 if no lab | P1 | 6 | accepted |
-| FR-CONT-006 | `GET /content/{unit_id}/practice` returns practice test set in student locale | P1 | 2 | accepted |
-| FR-CONT-007 | Entitlement middleware: HTTP 402 after 2 distinct lesson views for free-tier students | P0 | 2 | accepted |
+| FR-CONT-003 | `GET /content/{unit_id}/quiz` returns one quiz set (8 questions, rotated) in student locale | P0 | 2 | implemented |
+| FR-CONT-004 | `GET /content/{unit_id}/tutorial` returns remediation content in student locale | P1 | 2 | implemented |
+| FR-CONT-005 | `GET /content/{unit_id}/experiment` returns experiment JSON or HTTP 404 if no lab | P1 | 6 | implemented |
+| FR-CONT-006 | `GET /content/{unit_id}/practice` returns practice test set in student locale | P1 | 2 | implemented |
+| FR-CONT-007 | Entitlement middleware: HTTP 402 after 2 distinct lesson views for free-tier students | P0 | 2 | implemented |
 | FR-CONT-008 | Content version check: mobile re-downloads if `content_version` in cache differs from backend | P1 | 4 | accepted |
-| FR-CONT-009 | Fallback to `en` if requested locale file is missing from Content Store | P1 | 2 | accepted |
+| FR-CONT-009 | Fallback to `en` if requested locale file is missing from Content Store | P1 | 2 | implemented |
 | FR-CONT-010 | Signed URL expiry for audio files (S3 phase); short TTL (≤ 1 hour) | P1 | 4 | proposed |
 
 ---
@@ -129,18 +129,18 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-PIPE-001 | `build_grade.py --grade N --lang en` generates all content for a grade in one language | P0 | 2 | accepted |
-| FR-PIPE-002 | Pipeline generates lesson JSON, 3 quiz sets, tutorial, practice set per unit | P0 | 2 | accepted |
-| FR-PIPE-003 | Pipeline generates `experiment_{lang}.json` only for units with `assessments.labs` | P1 | 6 | accepted |
-| FR-PIPE-004 | TTS worker generates `lesson_{lang}.mp3` after lesson JSON is produced | P1 | 4 | accepted |
-| FR-PIPE-005 | `meta.json` written per unit with `generated_at`, `model`, `content_version`, `langs_built` | P0 | 2 | accepted |
-| FR-PIPE-006 | Pipeline is idempotent: skip units already built at current `content_version` unless `--force` | P0 | 2 | proposed |
-| FR-PIPE-007 | Pipeline validates output JSON schema before writing to Content Store | P0 | 2 | proposed |
-| FR-PIPE-008 | Pipeline emits structured log per unit: model, tokens used, cost estimate, duration | P1 | 2 | proposed |
-| FR-PIPE-009 | `build_unit.py --unit G8-MATH-001 --lang en` regenerates a single unit | P1 | 2 | accepted |
-| FR-PIPE-010 | Pipeline pins to a specific Claude model ID (no implicit latest) | P1 | 2 | proposed |
-| FR-PIPE-011 | Pipeline dry-run mode (`--dry-run`) that validates prompts without writing content | P2 | 2 | proposed |
-| FR-PIPE-012 | Spend cap: pipeline aborts if estimated cost exceeds `MAX_PIPELINE_COST_USD` config | P1 | 2 | proposed |
+| FR-PIPE-001 | `build_grade.py --grade N --lang en` generates all content for a grade in one language | P0 | 2 | implemented |
+| FR-PIPE-002 | Pipeline generates lesson JSON, 3 quiz sets, tutorial, practice set per unit | P0 | 2 | implemented |
+| FR-PIPE-003 | Pipeline generates `experiment_{lang}.json` only for units with `assessments.labs` | P1 | 6 | implemented |
+| FR-PIPE-004 | TTS worker generates `lesson_{lang}.mp3` after lesson JSON is produced | P1 | 4 | implemented |
+| FR-PIPE-005 | `meta.json` written per unit with `generated_at`, `model`, `content_version`, `langs_built` | P0 | 2 | implemented |
+| FR-PIPE-006 | Pipeline is idempotent: skip units already built at current `content_version` unless `--force` | P0 | 2 | implemented |
+| FR-PIPE-007 | Pipeline validates output JSON schema before writing to Content Store | P0 | 2 | implemented |
+| FR-PIPE-008 | Pipeline emits structured log per unit: model, tokens used, cost estimate, duration | P1 | 2 | implemented |
+| FR-PIPE-009 | `build_unit.py --unit G8-MATH-001 --lang en` regenerates a single unit | P1 | 2 | implemented |
+| FR-PIPE-010 | Pipeline pins to a specific Claude model ID (no implicit latest) | P1 | 2 | implemented |
+| FR-PIPE-011 | Pipeline dry-run mode (`--dry-run`) that validates prompts without writing content | P2 | 2 | implemented |
+| FR-PIPE-012 | Spend cap: pipeline aborts if estimated cost exceeds `MAX_PIPELINE_COST_USD` config | P1 | 2 | implemented |
 
 ---
 
@@ -148,11 +148,11 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-ALEX-001 | AlexJS runs against every Claude-generated text asset (lesson synopsis, quiz questions, tutorial text) during the pipeline, after schema validation | P0 | 2 | proposed |
-| FR-ALEX-002 | AlexJS output written to `alex_report.json` in the unit's Content Store directory; warning count aggregated into `content_subject_versions.alex_warnings_count` | P0 | 2 | proposed |
-| FR-ALEX-003 | Units with AlexJS warnings get `content_subject_version.status = needs_review`; units with zero warnings get `ready_for_review`; pipeline does not abort on warnings | P0 | 2 | proposed |
-| FR-ALEX-004 | AlexJS invoked via subprocess (`npx alex --stdin --reporter json`); Node.js and alex installed in the pipeline environment; timeout of 30 seconds per unit | P1 | 2 | proposed |
-| FR-ALEX-005 | `REVIEW_AUTO_APPROVE=true` env var marks new subject versions as `published` immediately; for dev/test environments only; absent or `false` in production | P1 | 2 | proposed |
+| FR-ALEX-001 | AlexJS runs against every Claude-generated text asset (lesson synopsis, quiz questions, tutorial text) during the pipeline, after schema validation | P0 | 2 | implemented |
+| FR-ALEX-002 | AlexJS output written to `alex_report.json` in the unit's Content Store directory; warning count aggregated into `content_subject_versions.alex_warnings_count` | P0 | 2 | implemented |
+| FR-ALEX-003 | Units with AlexJS warnings get `content_subject_version.status = needs_review`; units with zero warnings get `ready_for_review`; pipeline does not abort on warnings | P0 | 2 | implemented |
+| FR-ALEX-004 | AlexJS invoked via subprocess (`npx alex --stdin --reporter json`); Node.js and alex installed in the pipeline environment; timeout of 30 seconds per unit | P1 | 2 | implemented |
+| FR-ALEX-005 | `REVIEW_AUTO_APPROVE=true` env var marks new subject versions as `published` immediately; for dev/test environments only; absent or `false` in production | P1 | 2 | implemented |
 
 ---
 
@@ -160,7 +160,7 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-CREV-001 | No content is accessible to students until a `content_subject_version` with `status = published` exists for that `(curriculum_id, subject)`; content endpoint raises HTTP 404 otherwise | P0 | 2 | proposed |
+| FR-CREV-001 | No content is accessible to students until a `content_subject_version` with `status = published` exists for that `(curriculum_id, subject)`; content endpoint raises HTTP 404 otherwise | P0 | 2 | implemented |
 | FR-CREV-002 | Review queue (`GET /admin/content/review/queue`) returns subject versions filterable by `curriculum_id`, `subject`, `status`, and paginated | P0 | 7 | proposed |
 | FR-CREV-003 | A reviewer opens a session (`POST /admin/content/review/{version_id}/open`) that creates a `content_reviews` record; multiple reviewers may open sessions on the same version | P1 | 7 | proposed |
 | FR-CREV-004 | Reviewers can annotate specific words or phrases (`start_offset`, `end_offset`, `original_text`) and supply a replacement suggestion; annotation is linked to a unit + content_type + lang | P0 | 7 | proposed |
@@ -168,7 +168,7 @@
 | FR-CREV-006 | Reviewer submits `language_rating` (1–5) and `content_rating` (1–5) per version; both required before approval | P0 | 7 | proposed |
 | FR-CREV-007 | Reviewer approves (`POST .../approve`) or rejects with optional regeneration request (`POST .../reject` with `regenerate: bool`) | P0 | 7 | proposed |
 | FR-CREV-008 | Rejection with `regenerate=true` dispatches a Celery task to re-run the pipeline for flagged units; version status → `changes_requested`; new version created after re-run | P1 | 7 | proposed |
-| FR-CREV-009 | Students can submit marked-text feedback from the mobile UI (`POST /content/{unit_id}/feedback/marked`); submission stores offset + marked text + comment; does not block content access | P1 | 7 | proposed |
+| FR-CREV-009 | Students can submit marked-text feedback from the mobile UI (`POST /content/{unit_id}/feedback/marked`); submission stores offset + marked text + comment; does not block content access | P1 | 7 | implemented |
 | FR-CREV-010 | Student marked-text feedback is surfaced in the admin review queue alongside content annotations | P2 | 7 | proposed |
 
 ---
@@ -177,8 +177,8 @@
 
 | ID | Requirement | Priority | Phase | Status |
 |---|---|---|---|---|
-| FR-CVER-001 | Versioning is at subject level within a curriculum; a version encompasses all units for that subject | P0 | 2 | proposed |
-| FR-CVER-002 | Version numbers are sequential integers per `(curriculum_id, subject)`, starting at 1; assigned by the backend when a pipeline run creates the version record | P0 | 2 | proposed |
+| FR-CVER-001 | Versioning is at subject level within a curriculum; a version encompasses all units for that subject | P0 | 2 | implemented |
+| FR-CVER-002 | Version numbers are sequential integers per `(curriculum_id, subject)`, starting at 1; assigned by the backend when a pipeline run creates the version record | P0 | 2 | implemented |
 | FR-CVER-003 | Only one version may have `status = published` per `(curriculum_id, subject)` at any time; publishing a new version atomically archives the previously published version | P0 | 7 | proposed |
 | FR-CVER-004 | Version history is accessible via `GET /admin/content/versions?curriculum_id=&subject=` | P1 | 7 | proposed |
 | FR-CVER-005 | Rollback (`POST /admin/content/versions/{version_id}/rollback`) sets target version (must be `archived`) to `published` and atomically archives the current published version | P1 | 7 | proposed |

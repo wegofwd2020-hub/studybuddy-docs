@@ -83,7 +83,14 @@ Entries are grouped by domain, then sorted alphabetically within each group.
 
 | Acronym / Term | Full Form | Notes |
 |---|---|---|
-| **AlexJS** | alex (Node.js library) | Automated content language analysis tool. Detects profanity, gendered phrasing, and ableist language. Run as a subprocess from the Python pipeline after JSON schema validation. |
+| **AlexJS** | alex (Node.js library) | Automated content language analysis tool. Detects profanity, gendered phrasing, and ableist language. Run as a subprocess from the Python pipeline after JSON schema validation. Gracefully skipped if Node/npx unavailable. |
+| **content_subject_versions** | — (table name) | PostgreSQL table tracking which version of a subject's content is published. One published version allowed per `(curriculum_id, subject)` at a time. Statuses: `ready_for_review`, `needs_review`, `published`, `blocked`. |
+| **content_version** | — | Integer field in `meta.json` and cache keys. Incremented each time a unit is regenerated. Mobile app re-downloads content when cached `content_version` differs from the server's value. |
+| **meta.json** | — (filename) | Per-unit metadata file written to the Content Store by the pipeline. Contains `generated_at`, `model`, `content_version`, `langs_built`, and `alex_warnings_count`. Used for idempotency checks on subsequent pipeline runs. |
+| **quiz rotation** | — | Mechanism that cycles students through quiz sets 1→2→3→1 to prevent repeated exposure to identical questions. Tracked per `(student_id, unit_id)` in Redis. |
+| **REVIEW_AUTO_APPROVE** | — (env var) | Pipeline environment variable. When `true`, newly generated content is immediately marked `published` without going through the human review queue. For development and testing only; must be absent or `false` in production. |
+| **SpendCapExceeded** | — (exception class) | Exception raised by the pipeline when `tokens_used × TOKEN_COST_USD > MAX_PIPELINE_COST_USD`. Aborts the run and logs a cost alert. |
+| **student_entitlements** | — (table name) | PostgreSQL table tracking each student's subscription plan (`free`, `basic`, `premium`) and `lessons_accessed` count. Entitlement state is cached in Redis `ent:{student_id}` with 300s TTL. |
 | **DDL** | Data Definition Language | SQL statements that define schema (`CREATE TABLE`, `ALTER TABLE`, etc.). All DDL is managed through Alembic migrations. |
 | **L1 / L2 / L3** | Cache Level 1 / 2 / 3 | Three-tier caching hierarchy: L1 = per-worker in-process TTLCache (cachetools); L2 = shared Redis; L3 = CloudFront CDN. Hot read path must serve zero DB queries when cache-warm. |
 | **LRU** | Least Recently Used | Cache eviction policy. Used in L1 TTLCache and for mobile SQLite content cache when approaching `MAX_CACHE_MB`. |
@@ -132,4 +139,4 @@ Entries are grouped by domain, then sorted alphabetically within each group.
 
 ---
 
-*Last updated: 2026-03-24. Add new acronyms to the appropriate section; keep entries sorted alphabetically within each group.*
+*Last updated: 2026-03-25. Add new acronyms to the appropriate section; keep entries sorted alphabetically within each group.*
