@@ -176,4 +176,91 @@ Tracks all decisions, design changes, and implementation milestones.
   materialized view, cache invalidation, and mobile screens
 - CHANGES.md: added design decisions D-17/D-18/D-19; added pending items P-28 to P-31
 
-*Last updated: 2026-03-23*
+---
+
+## Implementation Log
+
+### Phase 1 — Backend Foundation (2026-03-24)
+
+**Branch:** `20260324_1310` → merged to `main`
+**Tests:** 38/38 passing
+
+**Files created:**
+- `backend/main.py` — FastAPI app, lifespan (asyncpg + aioredis pools), CORS, correlation ID middleware, custom HTTPException handler
+- `backend/config.py` — pydantic-settings; fail-fast on missing secrets; `JWT_SECRET` ≠ `ADMIN_JWT_SECRET` enforced
+- `backend/src/auth/router.py` — `POST /auth/exchange`, `/teacher/exchange`, `/refresh`, `/logout`, `/forgot-password`, `PATCH /student/profile`, `DELETE /auth/account`
+- `backend/src/auth/admin_router.py` — `POST /admin/auth/login`, `/forgot-password`, `/reset-password`; 5-failure lockout → 15-min cooldown
+- `backend/src/auth/service.py` — Auth0 JWKS L1 cache, internal JWT issue/verify, bcrypt in executor, upsert_student/teacher, Auth0 Management API calls
+- `backend/src/auth/schemas.py` — request/response models; `ForgotPasswordRequest.email` uses minimal `@` validator (not `EmailStr`) to prevent email enumeration via 422
+- `backend/src/auth/tasks.py` — Celery tasks: `sync_auth0_suspension`, `cascade_school_suspension`, `gdpr_delete_account`, `write_audit_log_task`
+- `backend/src/auth/dependencies.py` — `get_current_student`, `get_current_teacher`, `require_admin` FastAPI dependencies
+- `backend/src/account/router.py` — PATCH status endpoints for students/teachers/schools (RBAC-gated)
+- `backend/src/core/permissions.py` — `ROLE_PERMISSIONS` dict (7 roles × 15 permissions); `require_permission()` dependency
+- `backend/src/core/observability.py` — Prometheus counters/histograms, `CorrelationIdMiddleware`, `GET /health` (deep check), `GET /metrics` (token-protected)
+- `backend/src/core/events.py` — `emit_event()`, `write_audit_log()` (Celery dispatch)
+- `backend/src/core/cache.py`, `db.py`, `redis_client.py` — shared infrastructure helpers
+- `backend/src/curriculum/router.py` — `GET /curriculum/grades`, `GET /curriculum/grade/{grade}`
+- `backend/src/utils/logger.py` — structured JSON logger (structlog)
+- `backend/alembic/versions/0001_phase1_initial_schema.py` — tables: `schools`, `students`, `teachers`, `admin_users`, `parental_consents`, `audit_log`; ENUM types; indexes
+- `backend/tests/` — `conftest.py`, `test_auth.py`, `test_account.py`, `test_curriculum.py`, `test_health.py`, `helpers/token_factory.py`
+- `mobile/src/auth/auth0_client.py` — PKCE flow, code exchange
+- `mobile/src/auth/token_store.py` — secure JWT storage (0600 permissions)
+- `data/grade5_stem.json` … `data/grade12_stem.json` — default STEM curriculum metadata
+- `docker-compose.yml`, `infra/pgbouncer/pgbouncer.ini`, `infra/nginx/nginx.conf`, `infra/nginx/nginx.dev.conf`
+- `.github/workflows/test.yml` — CI pipeline
+- `dev_start.sh` — one-command dev environment launcher (start / test / stop / reset)
+
+**Bug fixes applied during implementation:**
+- Custom `HTTPException` handler: unwraps `detail` dict to root level so error envelope is always `{error, detail, correlation_id}`
+- `ForgotPasswordRequest`: changed `EmailStr` → `str` + `@` check to prevent 422 leaking email format acceptance
+- Admin lockout: added `headers=exc.headers or {}` to custom handler so `Retry-After` header is preserved
+- Cascade suspension: moved `import cascade_school_suspension` to module level so test patching works
+- Parental consent age-gate: `upsert_student` now sets `account_status='active'` for non-under-13 students (DB default was `pending`); exchange endpoint blocks `pending` with 403 `account_pending`
+- `dev_start.sh`: port conflict detection, dedicated test DB on port 5433, env var isolation before pytest
+
+---
+
+### Phase 2 — Content Pipeline + Delivery (2026-03-25)
+
+**Branch:** `main` (direct)
+**Tests:** 52/52 passing (+14 new)
+
+**Files created:**
+
+*Pipeline (`pipeline/`):*
+- `config.py` — `ANTHROPIC_API_KEY`, `CONTENT_STORE_PATH`, `CLAUDE_MODEL="claude-sonnet-4-6"` (pinned); `MAX_PIPELINE_COST_USD=50`; `TTS_PROVIDER`; `REVIEW_AUTO_APPROVE`
+- `prompts.py` — `build_lesson_prompt`, `build_quiz_prompt`, `build_tutorial_prompt`, `build_experiment_prompt`; grade-appropriate language complexity; locale-aware
+- `schemas.py` — JSON schemas + validators for lesson, quiz (enforces exactly 8 questions), tutorial, experiment, meta; `jsonschema` library
+- `alex_runner.py` — `npx alex --stdin`; 30s timeout; graceful no-op if Node/npx unavailable (`skipped=True`)
+- `tts_worker.py` — AWS Polly / Google TTS / no-op; never crashes pipeline on missing deps
+- `build_unit.py` — core generation: idempotency via `meta.json`, Claude API calls, schema validation (retry 3×), AlexJS, TTS synthesis, `meta.json` update, spend cap; CLI entry point
+- `build_grade.py` — loads `data/gradeN_stem.json`, upserts `curricula`/`curriculum_units` in DB, calls `build_unit` per unit/lang, creates `content_subject_versions` rows, structured JSON logs, run summary; CLI entry point
+- `seed_default.py` — seeds grades 5–12 idempotently into DB; CLI entry point
+
+*Alembic migration `0002_phase2_content_schema.py`:*
+- Tables: `curricula`, `curriculum_units`, `content_subject_versions`, `content_reviews`, `content_annotations`, `content_blocks`, `student_content_feedback`, `app_versions` (seeded `0.1.0`), `student_entitlements`
+
+*Backend content service (`backend/src/content/`):*
+- `schemas.py` — `LessonResponse`, `QuizResponse`, `TutorialResponse`, `ExperimentResponse`, `AudioUrlResponse`, `ReportRequest`, `FeedbackRequest`, `AppVersionResponse`
+- `service.py` — `get_entitlement`, `check_content_published`, `get_content_file`, `increment_lessons_accessed`, `resolve_curriculum_id`, `check_content_block`, `get_next_quiz_set`, `get_unit_subject`; L2 Redis cache (entitlement 300s TTL, content 3600s TTL)
+- `router.py` — 8 endpoints; published/block guards; free-tier 402 after 2 lessons; quiz rotation 1→2→3→1; audio returns URL not bytes; locale from JWT only
+
+*Mobile (`mobile/src/`):*
+- `logic/LocalCache.py` — thread-safe SQLite cache; LRU eviction to `MAX_CACHE_MB`
+- `api/content_client.py` — async httpx: `get_lesson`, `get_quiz`, `get_tutorial`, `get_audio_url`, `get_app_version`, `report_content`
+- `ui/SubscriptionScreen.py` — Kivy stub on HTTP 402; Subscribe button placeholder for Phase 5
+
+*Observability:*
+- `docs/prometheus/alerts.yml` — 3 alert groups (critical / high / medium); 8 rules
+
+*Tests:*
+- `backend/tests/test_content.py` — 9 tests: published guard, 402 entitlement gate, quiz rotation, experiment 404, report, app version, audio URL
+- `backend/tests/test_pipeline.py` — 5 tests: prompt builders, schema validation, 8-question enforcement, idempotency skip, spend cap
+
+**Key decisions made during Phase 2:**
+- AlexJS is optional: pipeline proceeds without Node.js installed; warnings count defaults to 0 with `skipped=True` flag in `meta.json`
+- TTS is optional: if no TTS provider configured, MP3 files are simply not generated; content endpoints still serve lesson JSON
+- `resolve_curriculum_id` defaults to `default-2026-g{grade}` based on JWT grade (school enrolment resolver added in Phase 9)
+- Audio endpoint returns local path URL in dev (`/static/content/...`), S3 pre-signed URL in production — same interface to mobile client
+
+*Last updated: 2026-03-25*
