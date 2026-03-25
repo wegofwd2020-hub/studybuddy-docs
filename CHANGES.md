@@ -431,3 +431,82 @@ curl http://localhost:8000/api/v1/student/dashboard -H "Authorization: Bearer <t
 | `GET` | `/api/v1/student/stats` | Student JWT | Usage stats for `?period=7d\|30d\|all`; includes `daily_activity[]` and streak counters |
 
 *Last updated: 2026-03-25*
+
+---
+
+## Phase 4 Implementation Log — Offline Sync + Push Notifications + Analytics
+
+**Date:** 2026-03-25
+**Branch:** main (snapshot branch `20260325_XXXX` created after commit)
+**Tests after phase:** 87 passed, 0 failed
+
+### Files Created
+
+| File | Purpose |
+|---|---|
+| `backend/alembic/versions/0004_phase4_push_notifications.py` | `push_tokens` + `notification_preferences` tables |
+| `backend/src/notifications/__init__.py` | Package marker |
+| `backend/src/notifications/schemas.py` | Pydantic schemas for token register/delete and preferences |
+| `backend/src/notifications/service.py` | DB helpers: `register_token`, `deregister_token`, `get_preferences`, `update_preferences`, `send_push_notification` (FCM HTTP v1) |
+| `backend/src/notifications/router.py` | POST/DELETE `/notifications/token`, GET/PUT `/notifications/preferences` |
+| `backend/src/analytics/__init__.py` | Package marker |
+| `backend/src/analytics/schemas.py` | Pydantic schemas for lesson start/end events |
+| `backend/src/analytics/service.py` | DB helpers: `start_lesson_view`, `verify_view_owner`, `end_lesson_view` |
+| `backend/src/analytics/router.py` | POST `/analytics/lesson/start` (201), POST `/analytics/lesson/end` (fire-and-forget) |
+| `backend/tests/test_notifications.py` | 7 tests: token register/upsert/delete, preferences defaults/update/auth |
+| `backend/tests/test_analytics.py` | 7 tests: start/end lifecycle, ownership, 400/404/409/auth |
+| `mobile/src/logic/EventQueue.py` | SQLite offline event queue: `enqueue`, `pending`, `mark_sent`, `purge_sent` |
+| `mobile/src/logic/SyncManager.py` | Flush queue on foreground/network restore; dispatches `progress_answer` + `lesson_end` to API |
+| `mobile/src/ui/SettingsScreen.py` | Language picker (clears content cache on change) + notification preference toggles |
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `backend/config.py` | Added `FCM_SERVER_KEY`, `S3_BUCKET_NAME`, `CLOUDFRONT_DISTRIBUTION_ID` (all Optional) |
+| `backend/src/auth/tasks.py` | Added `write_lesson_end_task`, `send_push_notification_task`, `check_streak_reminders`, `check_quiz_nudges`, `send_weekly_summary`; added Beat schedule for 3 notification tasks; imported `crontab` |
+| `backend/src/content/service.py` | Added `invalidate_cdn_path()` — triggers CloudFront invalidation on content version bumps (skips silently if `CLOUDFRONT_DISTRIBUTION_ID` unset) |
+| `backend/main.py` | Registered `notifications_router` and `analytics_router` at `/api/v1` |
+| `mobile/src/api/progress_client.py` | Added `start_lesson_view`, `end_lesson_view` (sync, for SyncManager), `register_push_token`, `get_notification_preferences`, `update_notification_preferences` |
+
+### Key Decisions
+
+- **`POST /analytics/lesson/end` is fire-and-forget** (same pattern as `/progress/answer`). Ownership is verified synchronously; the actual DB write is a Celery task. This avoids blocking the student's response on a DB write.
+- **SyncManager debounces concurrent flushes** — a second `flush()` call while one is running is a no-op (guarded by `threading.Lock`). Events are processed oldest-first.
+- **EventQueue `event_id` forwarded to backend** — the UUID is generated on enqueue and sent as the `event_id` field in the API request. Backend uses `ON CONFLICT DO NOTHING` for deduplication.
+- **Language picker clears `LocalCache`** — locale change must clear cached content so the next lesson load fetches the correct language file from backend. The JWT locale is still authoritative for content requests (server-side); the stored preference is sent on next token refresh (Phase 5).
+- **CDN invalidation is optional** — `invalidate_cdn_path()` silently skips when `CLOUDFRONT_DISTRIBUTION_ID` is unset (local dev / CI). In production, called from the admin pipeline trigger after content version bumps.
+- **Beat tasks are best-effort** — streak reminder, quiz nudge, and weekly summary tasks catch all exceptions and log a warning rather than crashing the beat worker.
+
+### How to Run
+
+```bash
+# Start dev environment
+./dev_start.sh
+
+# Run all tests
+./dev_start.sh test
+
+# Register push token (example)
+curl -X POST http://localhost:8000/api/v1/notifications/token \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"device_token":"fcm-abc123","platform":"android"}'
+
+# Start lesson view
+curl -X POST http://localhost:8000/api/v1/analytics/lesson/start \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"unit_id":"G8-MATH-001","curriculum_id":"default-2026-g8"}'
+```
+
+### New Endpoints (Phase 4)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/notifications/token` | Student JWT | Register/refresh FCM device token |
+| `DELETE` | `/api/v1/notifications/token` | Student JWT | Deregister FCM device token |
+| `GET` | `/api/v1/notifications/preferences` | Student JWT | Get notification opt-in flags (defaults: all true) |
+| `PUT` | `/api/v1/notifications/preferences` | Student JWT | Update notification opt-in flags |
+| `POST` | `/api/v1/analytics/lesson/start` | Student JWT | Record lesson open; returns `view_id` |
+| `POST` | `/api/v1/analytics/lesson/end` | Student JWT | Record lesson close with duration/flags (fire-and-forget) |
+
+*Last updated: 2026-03-25*
