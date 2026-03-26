@@ -66,6 +66,38 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ---
 
+### Phase 8 — School & Teacher + Curriculum Upload + Academic Year (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0007_phase8_school_curriculum.py` — ALTER TABLE curricula/curriculum_units to add Phase 8 columns: `source_type`, `status`, `restrict_access`, `created_by`, `activated_at` (curricula); `unit_name`, `objectives`, `lab_description`, `sequence`, `content_status` (curriculum_units). Makes legacy `title`/`description` columns nullable.
+- `backend/src/school/__init__.py` — Package init
+- `backend/src/school/schemas.py` — Request/response models: `SchoolRegisterRequest/Response`, `SchoolProfileResponse`, `TeacherInviteRequest/Response`
+- `backend/src/school/service.py` — `register_school` (school + school_admin teacher in one transaction, issues JWT immediately), `fetch_school` (school-scoped), `invite_teacher` (pending account, placeholder ext_auth_id)
+- `backend/src/school/router.py` — `POST /schools/register` (public), `GET /schools/{school_id}` (teacher JWT), `POST /schools/{school_id}/teachers/invite` (school_admin only)
+- `backend/src/curriculum/upload_service.py` — `parse_xlsx`, `build_xlsx_template`, `create_curriculum_from_json`, `trigger_pipeline` (Celery dispatch + Redis job state), `get_pipeline_job_status`, `seed_default_curriculum` (ON CONFLICT DO UPDATE)
+- `backend/src/curriculum/schemas.py` — Added `CurriculumUnitInput`, `CurriculumUploadRequest/Response`, `UploadError`, `PipelineTriggerRequest/Response`, `PipelineJobStatusResponse`
+- `backend/src/curriculum/router.py` — Added `GET /curriculum/template`, `POST /curriculum/upload`, `POST /curriculum/upload/xlsx`, `POST /curriculum/pipeline/trigger` (202), `GET /curriculum/pipeline/{job_id}/status`; route ordering critical: template + pipeline routes registered before `/{grade}`
+- `backend/src/auth/tasks.py` — Added `send_pipeline_email_task`, `run_curriculum_pipeline_task` (pipeline queue), `promote_student_grades` (Celery Beat at 00:05 UTC daily; no-op unless today == `GRADE_PROMOTION_DATE`)
+- `backend/config.py` — Added `GRADE_PROMOTION_DATE` (MM-DD format), `SENDGRID_API_KEY`, `EMAIL_FROM`
+- `backend/main.py` — Registered `school_router` under `/api/v1`
+- `backend/requirements.txt` — Added `openpyxl==3.1.5`
+- `pipeline/seed_default.py` — Rewritten to use `seed_default_curriculum()` from upload_service; maps data JSON format (title → unit_name, description → single objective); supports `--grade` flag for single-grade seeding
+- `backend/tests/test_school.py` — 9 tests covering registration, profile (school-scoped), teacher invite, RBAC, and auth rejection
+- `backend/tests/test_curriculum_upload.py` — 21 tests covering template download, JSON upload, XLSX upload, pipeline trigger/status, parse_xlsx unit tests, and promote_student_grades no-op checks
+
+**Key decisions:**
+
+- Migration 0007 uses ALTER TABLE (not CREATE TABLE) because `curricula` and `curriculum_units` tables already exist from Phase 2 (0002) with a simpler schema. Legacy `title`/`description` columns made nullable to allow new inserts that use `unit_name`/`objectives` instead.
+- `trigger_pipeline` catches Celery dispatch exceptions and logs a warning — pipeline dispatch failure is non-fatal; the job state is already written to Redis before the dispatch attempt.
+- Teacher token from `POST /schools/register` uses `JWT_SECRET` (not `ADMIN_JWT_SECRET`) — school admins are teachers on the teacher auth track.
+- `HTTPBearer(auto_error=True)` returns 403 (not 401) when no Authorization header is provided; 401 is only returned on invalid/expired tokens. Tests that check "no auth" correctly assert 403.
+- Curriculum upload tests pre-register a school via `POST /schools/register` to get a teacher token with a valid school_id that satisfies the `curricula.school_id` FK constraint.
+
+**Test count:** 159 (124 → 159, +35 Phase 8 tests)
+
+---
+
 ## Pending
 
 | # | Item | Phase |
