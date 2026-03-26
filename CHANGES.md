@@ -98,6 +98,32 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ---
 
+### Phase 9 — Student–School Association + Curriculum Routing (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0008_phase9_enrolment.py` — Creates `school_enrolments` table (school_id FK, student_email, student_id FK nullable, status pending/active, unique on school_id+email); indexes on school_status, email, student_id
+- `backend/src/school/enrolment_service.py` — `upload_roster` (upsert email list; auto-links already-registered students), `get_roster` (all rows for school), `link_student` (called on student login; matches email to pending enrolment, sets school_id on student)
+- `backend/src/school/schemas.py` — Added `EnrolmentUploadRequest/Response`, `EnrolmentRosterItem`, `EnrolmentRosterResponse`
+- `backend/src/school/router.py` — Added `POST /schools/{school_id}/enrolment` and `GET /schools/{school_id}/enrolment` (school_admin only for both)
+- `backend/src/curriculum/resolver.py` — `get_curriculum_id` FastAPI dependency; `_resolve_from_db` resolves active school curriculum (or default fallback); enforces `restrict_access` via enrolment check (403 if absent); Redis-cached 300s under `cur:{student_id}`; `invalidate_resolver_cache_for_school` helper
+- `backend/src/curriculum/schemas.py` — Added `CurriculumActivateResponse`
+- `backend/src/curriculum/router.py` — Added `PUT /curriculum/{curriculum_id}/activate`; archives previous active curriculum for same (school_id, grade, year); invalidates `cur:*` cache for enrolled students
+- `backend/src/auth/router.py` — After `upsert_student`, calls `link_student()` to auto-link any pending enrolment by email; re-fetches student to capture school_id set by linking
+- `backend/tests/test_enrolment.py` — 17 tests covering roster upload/dedup, roster get, activation (archives previous, wrong-school 403), resolver unit tests (default fallback, school curriculum, restrict_access 403)
+
+**Key decisions:**
+
+- `link_student` is called on every Auth0 exchange, not just first login: idempotent (checks `status='pending'`), so safe to call on login.
+- `restrict_access=False` (default): any student with the right school_id can access the school curriculum without an enrolment row.
+- `restrict_access=True`: requires an active `school_enrolments` row; raises 403 "not_enrolled" otherwise.
+- Curriculum resolver is cached per-student in Redis (`cur:{student_id}`); invalidated on activate (for all enrolled students) and would also be invalidated on school transfer.
+- `PUT /curriculum/{curriculum_id}/activate` parses asyncpg's "UPDATE N" string to count archived curricula.
+
+**Test count:** 176 (159 → 176, +17 Phase 9 tests)
+
+---
+
 ## Pending
 
 | # | Item | Phase |
