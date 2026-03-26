@@ -40,6 +40,172 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ## Implementation Log
 
+### Phase 1 — Backend Foundation (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0001_phase1_initial_schema.py` — Creates core identity tables: `schools` (stub FK target; school_id, name, contact_email, country, enrolment_code, status), `students` (Auth0 external users; student_id, external_auth_id, auth_provider, name, email, grade, locale, account_status, school_id, lessons_accessed; indexes on external_auth_id, school_id, account_status), `teachers` (Auth0 external users; teacher_id, school_id, external_auth_id, auth_provider, name, email, role; index on school_id), `admin_users` (internal product team bcrypt auth; admin_user_id, email, password_hash, role, totp_secret, last_login_at), `parental_consents` (COPPA compliance; consent_id, student_id FK, guardian_email, status, consent_token, token_expires_at, consented_at, ip_address; index on student_id), `audit_log` (immutable event trail; id, timestamp, event_type, actor_type/id, target_type/id, metadata JSONB, ip_address, correlation_id; indexes on timestamp, target, actor). Enums: `account_status` (pending/active/suspended/deleted), `admin_role` (developer/tester/product_admin/super_admin), `consent_status` (pending/granted/denied).
+- `backend/src/auth/__init__.py` — Package init
+- `backend/src/auth/schemas.py` — Auth0ExchangeRequest/Response, TokenRefreshRequest/Response, AdminLoginRequest/Response, ForgotPasswordRequest, ResetPasswordRequest, LogoutRequest
+- `backend/src/auth/service.py` — `exchange_auth0_token` (JWKS verify → upsert student/teacher → issue internal JWT), `refresh_token` (Redis validate → rotate), `admin_login` (bcrypt + lockout via Redis INCR), `admin_reset_password_request` (Redis TTL token), `delete_student_gdpr`
+- `backend/src/auth/router.py` — Student track: `POST /auth/exchange`, `POST /auth/refresh`, `POST /auth/logout`, `POST /auth/forgot-password`, `POST /auth/reset-password`, `DELETE /auth/me`. Teacher track: `POST /auth/teacher/exchange`
+- `backend/src/auth/admin_router.py` — `POST /admin/auth/login`, `POST /admin/auth/refresh`, `POST /admin/auth/reset-password/request`
+- `backend/src/auth/dependencies.py` — `get_current_student`, `get_current_teacher`, `get_current_admin` JWT verification dependencies; suspension check via Redis `suspended:{id}` key
+- `backend/src/auth/tasks.py` — Celery app setup; `send_auth0_block_task`, `send_reset_email_task`; Celery Beat schedule
+- `backend/src/account/router.py` — `PUT /admin/students/{student_id}/status`, `PUT /admin/teachers/{teacher_id}/status`, `PUT /admin/schools/{school_id}/status` (product_admin/super_admin only)
+- `backend/src/account/schemas.py` — `AccountStatusUpdateRequest/Response`
+- `backend/src/curriculum/router.py` — `GET /curriculum` (all grades + unit counts), `GET /curriculum/{grade}` (full unit tree for a grade)
+- `backend/src/curriculum/schemas.py` — `CurriculumUnit`, `CurriculumGrade`, `CurriculumListResponse`
+- `backend/src/core/cache.py` — L1 TTLCache wrapper (cachetools); L2 Redis helpers
+- `backend/src/core/db.py` — `get_db` async context manager (asyncpg connection from pool)
+- `backend/src/core/redis_client.py` — `get_redis` dependency
+- `backend/src/core/events.py` — `emit_event` structured log + Prometheus counter; `write_audit_log` Celery dispatch
+- `backend/src/core/observability.py` — `CorrelationIdMiddleware`, Prometheus metrics registry, `GET /health`, `GET /metrics` routes
+- `backend/src/core/permissions.py` — `ROLE_PERMISSIONS` static map; `require_permission()` FastAPI dependency
+- `backend/config.py` — pydantic-settings: DATABASE_URL, REDIS_URL, JWT_SECRET, TEACHER_JWT_SECRET, ADMIN_JWT_SECRET, AUTH0_DOMAIN, AUTH0_AUDIENCE, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, S3_BUCKET_NAME, CLOUDFRONT_DISTRIBUTION_ID, FCM_SERVER_KEY, SENTRY_DSN, CONTENT_STORE_PATH, METRICS_TOKEN, and all pool/TTL/limit settings
+- `backend/main.py` — FastAPI app factory; asyncpg + aioredis lifespan; CORS; CorrelationIdMiddleware; global exception handlers; routers registered under `/api/v1`
+- `backend/tests/conftest.py` — `db_conn` fixture (Alembic upgrade head on test DB, yield connection, rollback per test); `app` + `client` httpx fixtures; pool fixture on `app.state`
+- `backend/tests/test_auth.py` — 14 tests: exchange creates student, upsert on second login, under-13 blocked pending, suspended account, refresh valid, refresh invalid, logout deletes token, forgot-password (existing + nonexistent email), admin login valid/wrong-password, lockout after 5 failures, lockout reset on success, student token rejected on admin endpoint
+- `backend/tests/test_health.py` — 5 tests: health ok, correlation ID header present, provided correlation ID echoed, metrics requires token, metrics with valid token
+- `backend/tests/test_curriculum.py` — 9 tests: list returns all grades, list has unit counts, get grade 8/5/12, invalid grade too low/too high, lab units present, L1 cache hit
+- `backend/tests/test_account.py` — 10 tests: suspend/reactivate student, non-admin rejected, developer role rejected, suspend nonexistent 404, suspend already suspended 409, cannot change deleted account, suspend teacher, suspend school, school suspension requires admin
+
+**Key decisions:**
+
+- `POST /auth/forgot-password` always returns 200 regardless of whether the email exists — returning different responses leaks registered emails.
+- Suspension enforced via Redis `suspended:{id}` key with NO TTL — explicitly deleted on reactivation only; a TTL would silently restore access after expiry.
+- Two-track auth: Auth0 (external) for students and teachers; local bcrypt for internal team signed with separate `ADMIN_JWT_SECRET` so a compromised student JWT can never reach admin endpoints.
+- `GET /curriculum` reads from DB with L1 TTLCache; zero DB queries on cache-warm requests.
+
+**Test count:** 38 (0 → 38)
+
+---
+
+### Phase 2 — Content Pipeline + English Delivery (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0002_phase2_content_schema.py` — Creates: `curricula` (curriculum_id, grade, year, name, is_default, school_id; indexes on grade and school), `curriculum_units` (composite PK unit_id+curriculum_id, subject, title, description, has_lab, sort_order; index on curriculum_id), `content_subject_versions` (version_id, curriculum_id, subject, version_number, status, alex_warnings_count, generated_at, published_at, pipeline_run_id; unique on curriculum_id+subject+version_number), `content_reviews` (review_id, version_id, reviewer_id FK, action, notes, reviewed_at), `content_annotations` (annotation_id, version_id, unit_id, content_type, start/end_offset, marked_text, annotation_text, created_by/at), `content_blocks` (block_id, curriculum_id, unit_id, content_type, reason, blocked_by, blocked_at, unblocked_at; unique on curriculum_id+unit_id+content_type), `student_content_feedback` (feedback_id, student_id, unit_id, curriculum_id, content_type, category, message; index on unit), `app_versions` (platform, min_version, latest_version; seeded with all/0.1.0/0.1.0), `student_entitlements` (PK: student_id; plan, lessons_accessed, valid_until)
+- `backend/src/content/__init__.py` — Package init
+- `backend/src/content/schemas.py` — `LessonResponse`, `QuizQuestion`, `QuizResponse`, `TutorialResponse`, `AudioResponse` (pre-signed URL only), `AppVersionResponse`
+- `backend/src/content/service.py` — `get_lesson` (L1 → L2 → file read; checks published status + no active block; increments `lessons_accessed` + checks free-tier limit), `get_quiz` (rotates 3 sets by attempt count mod 3), `get_tutorial`, `get_audio` (returns pre-signed S3 URL; never proxies bytes), `check_entitlement` (Redis `ent:{student_id}` cached 300s), `get_app_version`
+- `backend/src/content/router.py` — `GET /content/{unit_id}/lesson`, `GET /content/{unit_id}/quiz`, `GET /content/{unit_id}/tutorial`, `GET /content/{unit_id}/audio`, `GET /content/version`; entitlement gating returns 402 on free-tier breach
+- `pipeline/config.py` — `ANTHROPIC_API_KEY`, `TTS_API_KEY`, `CONTENT_STORE_PATH`, `CLAUDE_MODEL` (pinned to `claude-sonnet-4-6`)
+- `pipeline/prompts.py` — `build_lesson_prompt`, `build_quiz_prompt`, `build_tutorial_prompt` per grade/subject/unit/lang
+- `pipeline/build_grade.py` — CLI: `--grade N --lang en,fr,es [--force] [--dry-run]`; idempotency via `meta.json` content_version check; JSON schema validation before write; spend cap abort; AlexJS integration
+- `pipeline/tts_worker.py` — Lesson text → MP3 via Amazon Polly / Google TTS; writes to `{CONTENT_STORE_PATH}/curricula/{curriculum_id}/{unit_id}/lesson_{lang}.mp3`
+- `backend/tests/test_content.py` — 10 tests: lesson returns content, lesson unpublished 404, free-tier limit 402, quiz rotates sets, experiment not found for non-lab, experiment 200 for lab unit, report 200, app version, content rate limit, audio returns URL
+
+**Key decisions:**
+
+- Audio endpoint returns a pre-signed S3/CloudFront URL — MP3 bytes are never proxied through FastAPI (performance rule #3).
+- Quiz sets rotated by `attempt_count mod 3` server-side — client cannot select a set.
+- `check_entitlement` cached in Redis under `ent:{student_id}` with 300s TTL; invalidated on subscription change.
+- Pipeline is idempotent: checks `meta.json` at unit start; skips if `content_version` matches and all expected files exist; `--force` overrides.
+- Claude model pinned in `pipeline/config.py` — never use implicit "latest".
+
+**Test count:** 52 (38 → 52, +14 content + pipeline tests)
+
+---
+
+### Phase 3 — Progress Tracking (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0003_phase3_progress_schema.py` — Creates: `progress_sessions` (session_id, student_id, unit_id, curriculum_id, grade, subject, started_at, ended_at, score, total_questions, completed, attempt_number, passed; indexes on student_id, unit_id, ended_at), `progress_answers` (answer_id, session_id FK, event_id UUID unique for offline dedup, question_id, student_answer, correct_answer, correct, ms_taken, recorded_at; index on session_id), `lesson_views` (view_id, student_id, unit_id, curriculum_id, duration_s, audio_played, experiment_viewed, started_at, ended_at; indexes on student_id and student+date). Materialized view `mv_student_curriculum_progress` (per student×unit roll-up: attempts, best_score, best_pct, status badge — completed/needs_retry/in_progress/not_started, last_attempt_at; UNIQUE index for concurrent refresh).
+- `backend/src/progress/__init__.py` — Package init
+- `backend/src/progress/schemas.py` — `SessionStartRequest/Response`, `AnswerRequest/Response`, `SessionEndRequest/Response`, `SessionHistoryResponse`
+- `backend/src/progress/service.py` — `start_session` (computes `attempt_number` server-side as COUNT+1; rejects if open session exists for same unit), `record_answer` (ownership check; fire-and-forget via Celery; deduplicates on `event_id`), `end_session` (idempotent 409 on double-end; computes passed ≥ 70%; Celery dispatches MV refresh), `get_session_history`
+- `backend/src/progress/router.py` — `POST /progress/session`, `POST /progress/answer`, `POST /progress/session/{session_id}/end`, `GET /progress/history`
+- `backend/src/student/__init__.py` — Package init
+- `backend/src/student/schemas.py` — `DashboardResponse` (streak, units in progress, recent activity), `CurriculumMapUnit`, `CurriculumMapResponse`, `StudentStatsResponse`
+- `backend/src/student/service.py` — `get_dashboard` (L1+L2 cached 60s; reads `mv_student_curriculum_progress` + Redis streak hash; invalidated on session end), `get_curriculum_map` (full unit list with status badges from MV), `get_stats` (total sessions, pass rate, audio plays, streak)
+- `backend/src/student/router.py` — `GET /student/dashboard`, `GET /student/progress`, `GET /student/stats`
+- `backend/src/auth/tasks.py` — Added `refresh_mv_student_progress_task` (refreshes `mv_student_curriculum_progress` concurrently); added `update_student_streak_task` (Celery Beat daily at 01:00 UTC; increments Redis streak hash or resets if >1 day gap)
+- `backend/tests/test_progress.py` — 10 tests: start session 201, attempt_number increments, record answer 200, wrong session 404, other student session 403, end session computes passed, not passed below threshold, double end 409, get history, progress requires auth
+- `backend/tests/test_student.py` — 11 tests: dashboard empty defaults, dashboard with data, dashboard cache, curriculum map empty, curriculum map with statuses, stats empty, stats with sessions, streak in dashboard, progress map badges, student endpoint auth required, student_id from JWT only
+
+**Key decisions:**
+
+- `attempt_number` is computed server-side as `COUNT(*) + 1` from prior sessions; any client-supplied value is ignored.
+- Progress answers use Celery fire-and-forget — `POST /progress/answer` returns 200 immediately without awaiting a DB write.
+- `mv_student_curriculum_progress` uses UNIQUE index for `REFRESH MATERIALIZED VIEW CONCURRENTLY` so reads are never blocked during refresh.
+- Student dashboard cached L1 (TTLCache 60s) + L2 (Redis 60s); invalidated by `end_session` to show updated badges.
+
+**Test count:** 73 (52 → 73, +21 progress + student tests)
+
+---
+
+### Phase 4 — Offline Sync + Push Notifications + Analytics (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0004_phase4_push_notifications.py` — Creates: `push_tokens` (token_id, student_id FK, device_token, platform CHECK IN android/ios/web, created_at, updated_at; UNIQUE on student_id+device_token; index on student_id), `notification_preferences` (PK: student_id; streak_reminders, weekly_summary, quiz_nudges booleans with True defaults, updated_at)
+- `backend/src/notifications/__init__.py` — Package init
+- `backend/src/notifications/schemas.py` — `PushTokenRegisterRequest` (device_token, platform), `PushTokenRegisterResponse`, `NotificationPreferencesRequest/Response`
+- `backend/src/notifications/service.py` — `register_push_token` (UPSERT ON CONFLICT; replaces old token for same student+device pair), `deregister_push_token` (DELETE by token value), `get_preferences` (returns defaults if no row), `update_preferences`
+- `backend/src/notifications/router.py` — `POST /notifications/token` (register), `DELETE /notifications/token` (deregister), `GET /notifications/preferences`, `PUT /notifications/preferences`
+- `backend/src/analytics/__init__.py` — Package init
+- `backend/src/analytics/schemas.py` — `LessonStartRequest/Response`, `LessonEndRequest/Response`
+- `backend/src/analytics/service.py` — `record_lesson_start` (INSERT into `lesson_views`; returns `view_id`), `record_lesson_end` (validates ownership + open state; Celery fire-and-forget write of duration_s, audio_played, experiment_viewed; 409 on double-end)
+- `backend/src/analytics/router.py` — `POST /analytics/lesson/start`, `POST /analytics/lesson/end`
+- `backend/src/auth/tasks.py` — Added `send_streak_reminder_task`, `send_weekly_summary_task`, `send_quiz_nudge_task` (Celery Beat tasks checking notification_preferences before FCM dispatch); added `record_lesson_end_task` (fire-and-forget DB write for lesson_views)
+- `pipeline/build_grade.py` — Added `--lang fr,es` support; pipeline generates `lesson_fr.json`, `lesson_es.json`, `lesson_{lang}.mp3` per unit
+- `backend/tests/test_analytics.py` — 7 tests: lesson start 201, lesson end fires-and-returns-200, ownership enforced, invalid view_id 400, nonexistent view 404, double end 409, auth required
+- `backend/tests/test_notifications.py` — 7 tests: register token 200, upsert idempotent, invalid platform 422, deregister, get preferences returns defaults, update and get preferences, notifications require auth
+
+**Key decisions:**
+
+- `POST /analytics/lesson/end` dispatches a Celery task and returns 200 immediately — never awaits a DB write on the request path.
+- Push token registration uses UPSERT so re-registering the same device is always safe and idempotent.
+- Multi-language pipeline generates per-language files in parallel; `meta.json` tracks `langs_built` list; `--force` re-generates all languages even if `content_version` matches.
+
+**Test count:** 87 (73 → 87, +14 analytics + notifications tests)
+
+---
+
+### Phase 5 — Subscription + Payments (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0005_phase5_subscriptions.py` — Creates: `subscriptions` (subscription_id, student_id FK, plan CHECK IN monthly/annual, status CHECK IN active/cancelled/past_due, stripe_customer_id, stripe_subscription_id UNIQUE, current_period_end, grace_period_end, created_at, updated_at; indexes on student_id, student+active partial, stripe_subscription_id), `stripe_events` (PK: stripe_event_id; event_type, processed_at, outcome CHECK IN ok/error, error_detail — idempotency + audit log)
+- `backend/src/subscription/__init__.py` — Package init
+- `backend/src/subscription/schemas.py` — `SubscriptionStatusResponse`, `CheckoutRequest` (plan), `CheckoutResponse` (checkout_url), `CancelResponse`
+- `backend/src/subscription/service.py` — `get_subscription_status` (checks `subscriptions` table; returns free tier if no row), `create_checkout_session` (Stripe hosted checkout; creates/retrieves `stripe_customer_id`; stores pending subscription), `handle_webhook` (verifies `stripe.Webhook.construct_event` first; deduplicates via `stripe_events`; handles `checkout.session.completed` → activate, `invoice.payment_failed` → grace period, `customer.subscription.deleted` → cancel; invalidates `ent:{student_id}` Redis key on each state change), `cancel_subscription`
+- `backend/src/subscription/router.py` — `GET /subscription/status`, `POST /subscription/checkout`, `POST /subscription/webhook` (raw body + Stripe-Signature header), `POST /subscription/cancel`
+- `backend/tests/test_subscription.py` — 12 tests: status free when no subscription, status active subscription, checkout 503 when Stripe not configured, checkout returns URL, webhook rejects invalid signature, webhook deduplicates, webhook checkout.session.completed, webhook payment_failed sets grace period, webhook subscription.deleted cancels, cancel 404 when none, cancel success, endpoints require auth
+
+**Key decisions:**
+
+- Stripe webhook verifies signature via `stripe.Webhook.construct_event` before any processing — invalid signatures return 400 immediately.
+- Webhook handler deduplicates by `stripe_event_id` (writes to `stripe_events` table; returns 200 if already processed) — ensures idempotency across Stripe retries.
+- Entitlement cache key `ent:{student_id}` is invalidated on every subscription state change so the content endpoint reflects the new plan within one Redis TTL window.
+
+**Test count:** 99 (87 → 99, +12 subscription tests)
+
+---
+
+### Phase 6 — Experiment Visualization (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/src/content/router.py` — Added `GET /content/{unit_id}/experiment` endpoint; returns 404 if `has_lab=False` for the unit or if `experiment_{lang}.json` does not exist in the Content Store
+- `backend/src/content/service.py` — Added `get_experiment` (checks `has_lab` flag on `curriculum_units`; reads `experiment_{lang}.json` from Content Store; caches in Redis under `content:experiment:{curriculum_id}:{unit_id}:{lang}`)
+- `backend/src/content/schemas.py` — Added `ExperimentStep`, `ExperimentResponse` (steps list, materials list, safety_notes, expected_outcome, grade_level)
+- `pipeline/prompts.py` — Added `build_experiment_prompt` (lab guide prompt for has_lab units; generates structured JSON with steps, materials, safety notes)
+- `pipeline/build_grade.py` — Added lab detection: only generates `experiment_{lang}.json` when unit `has_lab=True`; non-lab units produce no experiment file
+- `pipeline/build_unit.py` — New CLI: `--curriculum-id UUID --unit G8-MATH-001 --lang en`; regenerates a single unit; supports `--force`
+- `backend/tests/test_content.py` — Added 2 experiment tests (test_experiment_not_found_for_non_lab_unit, test_experiment_returns_200_for_lab_unit); these were counted in Phase 2 test file but activated in Phase 6
+
+**Key decisions:**
+
+- Experiment content is only generated (and only requested) for units where `has_lab=True`; the mobile app detects availability by HTTP status — 200 = show ExperimentScreen, 404 = hide button.
+- No new DB migration required — `has_lab` column was already present on `curriculum_units` from Phase 2.
+
+**Test count:** 100 (99 → 100, +1 net new experiment path test)
+
+---
+
 ### Phase 7 — Admin Dashboard + Analytics + Content Review (2026-03-26)
 
 **Files created/modified:**
