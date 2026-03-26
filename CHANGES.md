@@ -152,6 +152,36 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ---
 
+### Phase 11 — Teacher Reporting Dashboard (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0010_phase11_reports.py` — Creates `report_alert_settings` (school_id PK, threshold columns with defaults), `digest_subscriptions` (unique per school+teacher, enabled flag, timezone), `report_alerts` (triggered alert log with JSONB details, acked flag); creates 3 materialized views (`mv_class_summary`, `mv_student_progress`, `mv_feedback_summary`) with UNIQUE indexes for concurrent refresh
+- `backend/src/reports/__init__.py` — Package init
+- `backend/src/reports/schemas.py` — All Pydantic response models: `OverviewReport`, `UnitReport`, `StudentReport`, `CurriculumHealthReport`, `CurriculumHealthUnit`, `FeedbackReport`, `FeedbackGroup`, `TrendsReport`, `WeekSnapshot`, `ExportRequest/Response`, `AlertListResponse`, `AlertSettings/Response`, `DigestSubscribeRequest/Response`, `RefreshResponse`
+- `backend/src/reports/service.py` — Full reporting logic: `get_overview` (active students, lesson views, quiz pass rates, audio play rate, struggle/no-activity unit lists, unreviewed feedback count), `get_unit_report` (per-unit pass rate, attempt distribution, score percentile, top struggling students), `get_student_report` (per-student unit history with pass/fail/in-progress status), `get_curriculum_health` (all units ranked by health tier), `get_feedback_report` (feedback grouped by unit, filterable), `get_trends` (week-over-week snapshots), `refresh_materialized_views`, `save_alert_settings`, `get_alerts`, `subscribe_digest`, `trigger_export`
+- `backend/src/reports/router.py` — 12 endpoints with `_check_school()` ownership enforcement; all require teacher JWT; `POST /refresh` available to both school_admin and teacher; `GET /download/{export_id}` serves completed CSV files
+- `backend/src/auth/tasks.py` — Added Celery Beat schedule entries (nightly refresh 02:00 UTC, alert eval 06:00 UTC, weekly digest Monday 08:00 UTC); added `refresh_report_views_task`, `evaluate_report_alerts_task`, `send_weekly_digest_task`, `export_report_task`
+- `backend/main.py` — Registered `reports_router` under `/api/v1`
+- `backend/tests/test_reports.py` — 18 tests covering all 12 endpoints
+
+**Key decisions:**
+
+- Reports query underlying tables directly (not materialized views); MVs exist as production performance layer only — this simplifies tests (no MV refresh step) and ensures correctness.
+- Period mapping: `7d`=7 days, `30d`=30 days, `term`=September 1 of current/previous academic year. Trend periods: `4w`=4 weeks, `12w`=12 weeks, `term`=16 weeks.
+- Health tier logic: Healthy ≥70% first-attempt pass AND ≤1.5 avg attempts; Watch 50–70% or 1.5–2.0 avg; Struggling <50% or >2.0 avg; No Activity = zero lesson views.
+- Export flow: fire-and-forget Celery task writes CSV to `CONTENT_STORE_PATH/exports/{export_id}.csv`; separate `GET /download/{export_id}` endpoint serves the completed file.
+- `AND FALSE` enrolled filter: when a school has no enrolled students, the trends query uses `AND FALSE` as the student filter so the week-by-week loop still runs and returns zero-valued entries for all requested weeks (avoids empty response).
+
+**Bugs fixed:**
+
+- `get_overview` feedback placeholder off-by-one: feedback query only receives `*id_uuids` (no `start` param), so placeholders must start at `$1`, not `$2`. Created separate `fb_placeholders` variable independent of the main `placeholders` string.
+- `get_trends` early return on empty enrollment: removed `if not enrolled: return ...` early exit; precomputed `enrolled_filter` string with `AND FALSE` fallback ensures all `n_weeks` iterations always run.
+
+**Test count:** 215 (197 → 215, +18 Phase 11 tests)
+
+---
+
 ## Pending
 
 | # | Item | Phase |
