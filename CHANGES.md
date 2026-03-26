@@ -124,6 +124,34 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ---
 
+### Phase 10 — Extended Analytics + Student Feedback (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0009_phase10_feedback.py` — Creates `feedback` table (student_id FK, category CHECK IN content/ux/general, unit_id, curriculum_id, message, rating 1-5, reviewed bool, reviewed_by FK admin_users); indexes on student_id and reviewed
+- `backend/src/feedback/__init__.py` — Package init
+- `backend/src/feedback/schemas.py` — `FeedbackSubmitRequest` (category pattern, message max 500, rating 1-5 optional), `FeedbackSubmitResponse`, `AdminFeedbackItem`, `AdminFeedbackPagination`, `AdminFeedbackListResponse`
+- `backend/src/feedback/service.py` — `check_and_increment_rate_limit` (Redis INCR+EXPIRE, 5/student/hour key `feedback:rate:{student_id}:{hour}`), `submit_feedback` (INSERT returning feedback_id), `list_feedback` (paginated + filterable by category/unit/curriculum/reviewed)
+- `backend/src/feedback/router.py` — `POST /feedback` (student JWT, 429 if rate-limited), `GET /admin/feedback` (admin, requires `feedback:view`)
+- `backend/src/core/permissions.py` — Added `"feedback:view"` to `product_admin` permissions set
+- `backend/src/analytics/schemas.py` — Added `PerUnitStudentMetric`, `ImprovementPoint`, `StudentMetricsResponse`, `PerUnitClassMetric`, `ClassMetricsResponse`
+- `backend/src/analytics/service.py` — Added `get_student_metrics` (summary counters + per-unit breakdown + improvement trajectory from progress_sessions + lesson_views); added `get_class_metrics` (enrolled student aggregation with struggle_flag; fixed $1-based placeholder numbering bug); `_STRUGGLE_PASS_THRESHOLD = 50%`, `_STRUGGLE_ATTEMPTS_THRESHOLD = 2`
+- `backend/src/analytics/router.py` — Added `GET /analytics/student/me` (student JWT), `GET /analytics/school/{school_id}/class` (teacher JWT, school-scoped 403 enforcement)
+- `backend/main.py` — Registered `feedback_router` under `/api/v1`
+- `backend/tests/test_feedback.py` — 12 tests covering submit (valid, categories, invalid category 422, message too long 422), rate limiting (429 on 6th), admin list (pagination, category filter, reviewed filter, wrong-role 403, no-auth 403)
+- `backend/tests/test_analytics_extended.py` — 9 tests covering student/me (empty defaults, with data, auth required), class metrics (empty school, with data, struggle_flag low-pass-rate, wrong-school 403, auth required)
+
+**Key decisions:**
+
+- Rate limit key includes the hour bucket (`%Y%m%d%H`) so the 5/hour window rolls naturally without a scheduled cleanup job.
+- `struggle_flag` is `True` when `first_attempt_pass_rate_pct < 50%` OR `mean_attempts_to_pass > 2` — either condition suffices.
+- `get_class_metrics` fetches enrolled student IDs first, then uses `ANY(ARRAY[...]::uuid[])` to filter progress data — avoids a JOIN to `school_enrolments` inside the metrics query.
+- Placeholder numbering bug fixed: original code used `$2` as first student ID placeholder (no `$1` in the query), causing `IndeterminateDatatypeError`. Fixed to start at `$1` with grade/subject appended after.
+
+**Test count:** 197 (176 → 197, +21 Phase 10 tests)
+
+---
+
 ## Pending
 
 | # | Item | Phase |
