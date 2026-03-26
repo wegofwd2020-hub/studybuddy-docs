@@ -350,48 +350,7 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ## Pending
 
-| # | Item | Phase |
-|---|---|---|
-| P-01 | FastAPI project skeleton | 1 |
-| P-02 | PostgreSQL schema design (`students`, `sessions`, `subscriptions`) | 1 |
-| P-03 | Auth service (register / login / refresh) — with `locale` field | 1 |
-| P-04 | Curriculum service | 1 |
-| P-05 | Mobile thin-client auth flow (with language picker at registration) | 1 |
-| P-06 | Content generation pipeline CLI (`build-grade --grade N --lang en`) | 2 |
-| P-07 | Content service endpoints (lesson, quiz, practice, tutorial) | 2 |
-| P-08 | Entitlement middleware (free-tier 2-lesson limit, HTTP 402) | 2 |
-| P-09 | Mobile SQLite content cache (`unit_id + content_version + lang`) | 2 |
-| P-10 | `SubscriptionScreen` stub | 2 |
-| P-11 | Progress service endpoints | 3 |
-| P-12 | Mobile progress event posting | 3 |
-| P-28 | Student progress reports: `GET /student/dashboard`, `GET /student/progress`, `GET /student/stats` | 3 |
-| P-29 | Streak counter in Redis + Celery daily updater | 3 |
-| P-30 | Materialized view `mv_student_curriculum_progress` + async refresh on session end | 3 |
-| P-31 | Mobile: `ProgressDashboardScreen`, `CurriculumMapScreen`, `StatsScreen` | 3 |
-| P-13 | SQLite offline event queue + SyncManager | 4 |
-| P-14 | Backend event deduplication | 4 |
-| P-15 | Multi-language pipeline (`--lang fr,es`) | 4 |
-| P-16 | TTS worker (`tts_worker.py`): lesson text → MP3 | 4 |
-| P-17 | Audio delivery endpoint + mobile "🔊 Listen" button | 4 |
-| P-18 | Language picker in mobile Settings; locale switch + cache clear | 4 |
-| P-19 | Mobile i18n: static UI string dictionaries (en/fr/es) | 4 |
-| P-20 | Subscription service: Stripe checkout + webhook handler | 5 |
-| P-21 | `SubscriptionScreen` with real plan cards and checkout flow | 5 |
-| P-22 | Entitlement cache in Redis | 5 |
-| P-23 | Experiment pipeline: detect `assessments.labs`, generate `experiment_{lang}.json` | 6 |
-| P-24 | Experiment content endpoint (`GET /content/{unit_id}/experiment`) | 6 |
-| P-25 | `ExperimentScreen` mobile UI (step-by-step lab guide) | 6 |
-| P-26 | Admin API + dashboard | 7 |
-| P-27 | Subscription analytics (MRR, churn, conversion) | 7 |
-| P-32 | RBAC: `core/permissions.py` `ROLE_PERMISSIONS` map + `require_permission()` dependency | 7 |
-| P-33 | AlexJS pipeline integration: `pipeline/alex_checker.py` + `alex_report.json` per unit | 2 |
-| P-34 | `content_subject_versions` PostgreSQL schema + Alembic migration | 2 |
-| P-35 | Content endpoint guard: `status = published` AND no active block | 2 |
-| P-36 | Content review queue + annotation + rating + approve/reject endpoints (Phase 7) | 7 |
-| P-37 | Dictionary/thesaurus integration: Datamuse + Merriam-Webster API | 7 |
-| P-38 | Publish + rollback + CDN invalidation for content versioning | 7 |
-| P-39 | Content block + lift endpoints; school-scoped and platform-wide | 7 |
-| P-40 | Student marked-text feedback: mobile UI + `POST /content/{unit_id}/feedback/marked` | 7 |
+All planned items through Phase 11 are complete. No further phases are defined.
 
 ---
 
