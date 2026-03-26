@@ -40,7 +40,29 @@ Tracks all decisions, design changes, and implementation milestones.
 
 ## Implementation Log
 
-*No implementation has begun. Log entries will be added here as phases are completed.*
+### Phase 7 — Admin Dashboard + Analytics + Content Review (2026-03-26)
+
+**Files created/modified:**
+
+- `backend/alembic/versions/0006_phase7_admin_review.py` — Adds `language_rating`, `content_rating` columns to `content_reviews`; adds `archived_at` to `content_subject_versions`; indexes on status and feedback category
+- `backend/src/admin/__init__.py` — Package init
+- `backend/src/admin/schemas.py` — All request/response models for 16 admin endpoints; datetime fields use Python `datetime` type (Pydantic serialises to ISO 8601)
+- `backend/src/admin/service.py` — Full admin business logic: review queue, open/annotate/rate/approve/reject, publish/rollback (Redis + CDN invalidation), content blocks, feedback listing, subscription analytics (MRR/churn), struggle analytics, pipeline status, Datamuse + Merriam-Webster dictionary
+- `backend/src/admin/router.py` — 16 admin endpoints using chained `_require(permission)` dependency that combines `get_current_admin` + RBAC in one dependency so FastAPI's dependency graph guarantees auth runs before the permission check
+- `backend/src/core/permissions.py` — Fixed `async def dependency(request: Request)` type annotation (previously untyped, causing FastAPI to treat `request` as a query parameter → 422 on all admin endpoints)
+- `backend/src/auth/tasks.py` — Added `regenerate_subject_task` Celery task; added pipeline queue route
+- `backend/config.py` — Added `MW_API_KEY` optional setting for Merriam-Webster
+- `backend/main.py` — Registered `admin_router` under `/api/v1`
+- `backend/tests/test_admin.py` — 24 tests covering all 16 endpoints plus auth rejection
+
+**Key decisions:**
+
+- `_require(permission)` pattern in admin router chains `get_current_admin` as a sub-dependency of the permission check. This is required because FastAPI runs independent `Depends()` branches concurrently; `require_permission` reads `request.state.jwt_payload` which `get_current_admin` sets — so they must be ordered.
+- Student JWTs on admin endpoints return 401 (not 403) because ADMIN_JWT_SECRET verification fails before RBAC is checked.
+- Datetime fields in schemas use `datetime` type; Pydantic v2 handles ISO 8601 serialisation automatically — no manual `.isoformat()` calls needed for dict-based responses.
+- Fixed test admin UUID (`_TEST_ADMIN_ID`) ensures the JWT's `admin_id` and the DB row's `admin_user_id` match, satisfying FK constraints on `content_reviews.reviewer_id` and `content_blocks.blocked_by`.
+
+**Test count:** 124 (100 → 124, +24 admin tests)
 
 ---
 
