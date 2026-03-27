@@ -913,3 +913,40 @@ STRIPE_PRICE_ANNUAL_ID=price_...
 - **Pipeline job detail reuses `getPipelineStatus`** from `lib/api/curriculum-admin.ts` — the backend endpoint is the same whether called from the school portal or admin console; no duplication needed.
 
 *Last updated: 2026-03-27*
+
+---
+
+## Phase W7 Implementation Log — Playwright E2E Integration Tests
+
+**Date:** 2026-03-27
+**Branch:** main (tag: `phase-w7`)
+**Playwright E2E tests after phase:** 34 passing (+26 new / updated)
+**Vitest unit tests:** 99 (unchanged)
+
+### Files Added / Modified
+
+| File | Change |
+|---|---|
+| `web/tests/e2e/admin-portal.spec.ts` | 13 E2E tests: admin login success/error, auth redirect, dashboard/analytics/health/pipeline/content-review page structure, RBAC nav diff |
+| `web/tests/e2e/auth-redirects.spec.ts` | 6 E2E tests: student/school/admin unauthenticated access redirects correctly |
+| `web/tests/e2e/login-pages.spec.ts` | 7 E2E tests: school login structure; admin login fields, error state, success + token stored |
+| `web/tests/e2e/public.spec.ts` | Updated: fixed selectors (exact text + `.first()` for desktop/mobile nav duplication) |
+| `web/playwright.config.ts` | Removed Mobile Chrome project; added `webServer.env` with fake Auth0 credentials |
+| `web/docs/PHASE_W7_PRE.md` | Pre-phase design doc |
+| `web/docs/PHASE_W7_POST.md` | Post-phase snapshot |
+
+### Files Deleted
+
+| File | Reason |
+|---|---|
+| `web/app/page.tsx` | Stale Next.js scaffold template was shadowing `app/(public)/page.tsx` at `/` — the real StudyBuddy landing page was never served in development |
+
+### Key Decisions
+
+- **Mock JWT for admin tests** — `makeAdminJwt(role)` builds a decodable unsigned JWT (no backend needed). Injected via `page.addInitScript()` before navigation so the admin layout's `useEffect` finds the token.
+- **API mocked via `page.route()`** — All `**/api/v1/admin/**` requests are fulfilled with stub JSON. No backend required for E2E tests.
+- **401 → loop avoidance** — The admin-client interceptor redirects to `/admin/login` on 401. The login error test uses `status: 422` to avoid the redirect loop.
+- **Auth0 redirect tests use fake env vars** — `webServer.env` injects fake but correctly-shaped `AUTH0_SECRET` etc. so `auth0.getSession()` initialises without crashing; with no real session cookie, it returns `null` → layout redirects as expected.
+- **Desktop/mobile nav duplication** — `PublicNav` renders both views; any link name found in nav will match 2 elements. Fixed with `.first()` on all public nav link assertions.
+
+*Last updated: 2026-03-27*
