@@ -867,3 +867,49 @@ STRIPE_PRICE_ANNUAL_ID=price_...
 - **ExperimentScreen receives data from SubjectScreen** — never makes its own network call; data is passed via `set_experiment(data)` before navigation, keeping the experiment screen fast and cache-aware.
 
 *Last updated: 2026-03-25*
+
+---
+
+## Phase W6 Implementation Log — Web Admin Console
+
+**Date:** 2026-03-27
+**Branch:** main (tag: `phase-w6`)
+**Tests after phase:** 99 passed, 0 failed (+23 new)
+**Routes after phase:** 56 (added 11 admin routes)
+
+### Files Created
+
+| File | Purpose |
+|---|---|
+| `web/lib/api/admin-client.ts` | Axios client using `sb_admin_token`; 401 → `/admin/login` redirect |
+| `web/lib/api/admin.ts` | All admin API functions: auth, analytics, pipeline, review, feedback, health, audit |
+| `web/lib/hooks/useAdmin.ts` | JWT decode for `sb_admin_token`; `AdminRole` type; `hasPermission(role, minRole)` |
+| `web/components/layout/AdminNav.tsx` | Dark sidebar with RBAC-filtered items; role badge; sign-out |
+| `web/app/(admin)/layout.tsx` | Client layout: checks `sb_admin_token` on mount; wraps in QueryProvider + AdminNav |
+| `web/app/(public)/admin/login/page.tsx` | Local bcrypt login form; stores token; navigates to dashboard |
+| `web/app/(admin)/admin/dashboard/page.tsx` | KPI cards: total active, MRR, new/cancelled, churn; pipeline summary |
+| `web/app/(admin)/admin/analytics/page.tsx` | Subscription breakdown table + struggle report (fail rate heat) |
+| `web/app/(admin)/admin/pipeline/page.tsx` | Jobs list with status badge; auto-refreshes; link to detail |
+| `web/app/(admin)/admin/pipeline/trigger/page.tsx` | Grade/lang/force form; product_admin+ only; navigates to job detail |
+| `web/app/(admin)/admin/pipeline/[job_id]/page.tsx` | Progress bar + counts; reuses `getPipelineStatus`; 5 s poll |
+| `web/app/(admin)/admin/content-review/page.tsx` | Review queue with status filter tabs |
+| `web/app/(admin)/admin/content-review/[version_id]/page.tsx` | Lesson preview; annotations; action buttons with modal for reject/block |
+| `web/app/(admin)/admin/feedback/page.tsx` | Student feedback with star ratings; resolve action; product_admin+ |
+| `web/app/(admin)/admin/health/page.tsx` | DB + Redis status; overall banner; 10 s auto-poll |
+| `web/app/(admin)/admin/audit/page.tsx` | Audit entries with action filter; product_admin+ |
+| `web/tests/unit/admin-rbac.test.ts` | 11 tests: hasPermission for all roles; nav filter logic |
+| `web/tests/unit/review-actions.test.ts` | 8 tests: all 5 review actions + queue fetch API mocks |
+| `web/tests/unit/health-poller.test.ts` | 5 tests: health fetch, colour mapping, always-poll interval |
+| `web/docs/PHASE_W6_PRE.md` | Pre-phase design doc |
+| `web/docs/PHASE_W6_POST.md` | Post-phase snapshot |
+
+### Key Decisions
+
+- **Admin uses local bcrypt, not Auth0** — admin credentials are internal team only; no external IdP needed. `POST /admin/auth/login` validates email/password and returns a JWT signed with `ADMIN_JWT_SECRET` (separate secret from student/teacher JWTs).
+- **Admin layout is a Client Component** — unlike the school layout (which calls `auth0.getSession()` server-side), the admin layout reads `sb_admin_token` from localStorage on mount. This is correct because the token was issued by local bcrypt, not a server-side session cookie.
+- **RBAC via role rank** — `hasPermission(role, minRole)` compares integer ranks (`developer=0 … super_admin=3`). Pages that require elevated access render an access-denied message inline rather than redirecting (consistent with W5 teachers page pattern).
+- **Content review actions use an inline modal** — reject and block require a non-empty reason. Approve/publish/rollback execute immediately. All actions invalidate the review queue cache and navigate back.
+- **Health endpoint is unauthenticated** — `GET /health` requires no auth token. `getSystemHealth()` uses the base `api` client (not `adminApi`) to avoid 401 redirect loops when health check is called before token is loaded.
+- **Pipeline job detail reuses `getPipelineStatus`** from `lib/api/curriculum-admin.ts` — the backend endpoint is the same whether called from the school portal or admin console; no duplication needed.
+
+*Last updated: 2026-03-27*
