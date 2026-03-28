@@ -1,37 +1,83 @@
-# Dev Test Accounts
+# StudyBuddy OnDemand — Developer Test Accounts
 
-Local development bypass for testing all three portals without Auth0 configured.
+Local development bypass for testing all four roles without Auth0 configured.
 
 ---
 
 ## Quick Start
 
-1. Start the stack: `docker compose up`
-2. Open [http://localhost:3000/dev-login](http://localhost:3000/dev-login)
-3. Click the role you want to test — you are redirected to that portal immediately
+```bash
+# 1. Start the stack
+docker compose up
+
+# 2. Seed all dev accounts + test data (run once after first docker compose up)
+docker compose exec api python scripts/setup_dev.py
+
+# 3. Open the dev login page
+open http://localhost:3000/dev-login
+```
+
+To wipe all dev data and start fresh:
+
+```bash
+docker compose exec api python scripts/setup_dev.py --reset
+```
 
 ---
 
 ## Accounts
 
-| Role | Name | Email | Portal URL |
+| Role | Email | Password / Method | Portal |
 |---|---|---|---|
-| Admin | — | `wegofwd2020@gmail.com` | `/admin/login` |
-| Teacher | Dev Teacher | `dev.teacher@studybuddy.dev` | `/school/dashboard` |
-| Student | Dev Student | `dev.student@studybuddy.dev` | `/student/dashboard` |
+| **Student** | `dev.student@studybuddy.dev` | `/dev-login` → Student | `http://localhost:3000/dashboard` |
+| **Teacher** | `dev.teacher@studybuddy.dev` | `/dev-login` → Teacher | `http://localhost:3000/school/dashboard` |
+| **School Admin** | `dev.schooladmin@studybuddy.dev` | `/dev-login` → School Admin | `http://localhost:3000/school/dashboard` |
+| **Super Admin** | `dev.admin@studybuddy.dev` | Password below | `http://localhost:3000/admin/login` |
 
-**Admin password:** `1304!Yosimite`
-Teacher and student accounts have no password — use the `/dev-login` bypass page.
+**Super Admin password:** `DevAdmin1234!`
 
-### Student details
-- Grade: 8
-- Locale: `en`
-- Account status: `active`
+---
 
-### Teacher details
-- Role: `teacher`
-- School: Dev School (`school_id = 00000000-0000-0000-0000-000000000001`)
-- Account status: `active`
+## What Gets Seeded
+
+`setup_dev.py` is fully idempotent — safe to run multiple times. On each run it creates (or skips if already present):
+
+| Item | Details |
+|---|---|
+| Dev School | `school_id = 00000000-0000-0000-0000-000000000001` · enrolment code `DEVSCHOOL01` |
+| Super Admin user | bcrypt login for the admin portal |
+| School Admin teacher | Role `school_admin` on Dev School |
+| Teacher | Role `teacher` on Dev School |
+| Student | Grade 8 · enrolled in Dev School · premium entitlement (no paywall) |
+| Grade 8 curriculum | All units from `data/grade8_stem.json` seeded to DB + content store |
+| Progress data | 5 passed sessions (5-day streak) · 3 older passed sessions · 2 failed sessions · 1 open session |
+| Lesson views | 8 lesson view records with realistic durations |
+
+---
+
+## Test Data Overview — Student Portal
+
+After setup, the student (`dev.student@studybuddy.dev`) will show:
+
+- **Streak:** 5 days
+- **Units completed:** 8 (passed)
+- **Units needing retry:** 2
+- **Units in progress:** 1
+- **Subject breakdown:** across all Grade 8 subjects
+
+This gives the Curriculum page, Progress screen, and student analytics all meaningful data to display.
+
+---
+
+## Test Data Overview — Teacher Portal
+
+After setup, the teacher/school admin will see:
+
+- **Class Overview:** 1 student in roster with real activity metrics
+- **Reports → Overview:** active student count, pass rates, lesson views
+- **Reports → Trends:** week-over-week data
+- **Reports → Curriculum Health:** unit health tiers based on pass rates
+- **Reports → Student:** full report card for Dev Student
 
 ---
 
@@ -39,52 +85,61 @@ Teacher and student accounts have no password — use the `/dev-login` bypass pa
 
 ### Backend — `POST /api/v1/auth/dev-login`
 
-Accepts `{"role": "student" | "teacher"}`.
-
-- Only registered when `APP_ENV=development` (guarded in `main.py`)
-- Creates the school, teacher, and student records on first call (idempotent)
+- Accepts `{"role": "student" | "teacher" | "school_admin"}`
+- Only registered when `APP_ENV=development` — returns HTTP 403 in any other environment
+- Creates the school/teacher/student records on first call (idempotent)
 - Returns a **7-day JWT** + name + email
-
-Source: `backend/src/auth/dev_router.py`
+- Source: `backend/src/auth/dev_router.py`
 
 ### Web — `/dev-login` page
 
-Source: `web/app/(public)/dev-login/page.tsx`
+- Source: `web/app/(public)/dev-login/page.tsx`
+- On login:
+  1. Calls `/api/dev-login` (Next.js proxy — avoids CORS)
+  2. Stores token in `localStorage` (`sb_token` for student, `sb_teacher_token` for teacher/school_admin)
+  3. Sets a `sb_dev_session` cookie (base64 JSON `{name, email}`) for server-side layouts
+  4. Redirects to the portal
 
-On login:
-1. Calls the backend dev-login endpoint
-2. Stores the token in `localStorage` (`sb_token` for student, `sb_teacher_token` for teacher)
-3. Sets a `sb_dev_session` cookie (base64 JSON `{name, email}`) for server-side layouts
-4. Redirects to the portal
+### Web — Server layout fallback
 
-### Web — server layout fallback
+- Sources: `web/app/(student)/layout.tsx`, `web/app/(school)/layout.tsx`
+- Both layouts do: `session = auth0.getSession() ?? getDevSession()`
+- Auth0 takes priority. Without Auth0, the `sb_dev_session` cookie is used as fallback.
+- Helper: `web/lib/dev-session.ts`
 
-Sources: `web/app/(student)/layout.tsx`, `web/app/(school)/layout.tsx`
+### `setup_dev.py` — Master Setup Script
 
-Both layouts now do:
+Idempotent script that creates all four accounts + seeds curriculum + seeds realistic
+progress/analytics data. Designed to be run once after `docker compose up` on a fresh
+environment, or with `--reset` to wipe and re-seed.
+
+```bash
+# First-time setup
+docker compose exec api python scripts/setup_dev.py
+
+# Reset and re-seed everything
+docker compose exec api python scripts/setup_dev.py --reset
 ```
-session = auth0.getSession() ?? getDevSession()
-```
-
-Auth0 takes priority. If Auth0 is not configured (local dev), the `sb_dev_session` cookie is used as a fallback. Helper: `web/lib/dev-session.ts`.
-
----
-
-## Files Changed / Added
-
-| File | Change |
-|---|---|
-| `backend/src/auth/dev_router.py` | New — dev-login endpoint |
-| `backend/main.py` | Conditionally registers dev router |
-| `web/lib/dev-session.ts` | New — server-side dev session cookie reader |
-| `web/app/(student)/layout.tsx` | Added `getDevSession()` fallback |
-| `web/app/(school)/layout.tsx` | Added `getDevSession()` fallback |
-| `web/app/(public)/dev-login/page.tsx` | New — dev login UI |
 
 ---
 
 ## Security Notes
 
-- The `/auth/dev-login` endpoint returns HTTP 403 if `APP_ENV != "development"` — it cannot be called in production even if the route were somehow registered
-- The `sb_dev_session` cookie is not signed; it is display-only (name/email for the portal header). API authorization always uses the JWT in `localStorage`, verified server-side
-- Tokens expire after 7 days; re-visit `/dev-login` to refresh
+- The `/auth/dev-login` endpoint returns HTTP 403 if `APP_ENV != "development"` — it cannot be called in production even if the code were deployed
+- `setup_dev.py` connects directly to `db:5432`, bypassing PgBouncer (required for asyncpg prepared statements)
+- The `sb_dev_session` cookie is not signed — it is display-only (name/email for the portal header). All API authorization uses the JWT in `localStorage`, verified server-side
+- Tokens expire after 7 days; revisit `/dev-login` to refresh
+- Dev accounts use `auth_provider = 'dev'` so they are distinguishable from real Auth0 accounts in the database
+
+---
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `backend/scripts/setup_dev.py` | Master idempotent setup script — accounts + curriculum + test data |
+| `backend/scripts/seed_dev_content.py` | Content-only seed (called by migrate service on startup) |
+| `backend/src/auth/dev_router.py` | `/auth/dev-login` endpoint (student / teacher / school_admin) |
+| `web/app/(public)/dev-login/page.tsx` | Dev login UI with all 3 role buttons |
+| `web/app/api/dev-login/route.ts` | Next.js proxy to backend (avoids CORS) |
+| `web/lib/dev-session.ts` | Server-side dev session cookie reader |
