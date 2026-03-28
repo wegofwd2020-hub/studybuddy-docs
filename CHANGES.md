@@ -950,3 +950,48 @@ STRIPE_PRICE_ANNUAL_ID=price_...
 - **Desktop/mobile nav duplication** — `PublicNav` renders both views; any link name found in nav will match 2 elements. Fixed with `.first()` on all public nav link assertions.
 
 *Last updated: 2026-03-27*
+
+---
+
+## Round 1 Developer Testing — Bug Fixes
+
+**Date:** 2026-03-28
+**Branch:** main
+**Tests after fixes:** 210 passed, 5 failed (pre-existing pipeline module failures), 0 new failures
+**Commit:** `87297e6`
+
+### Schema Fixes
+
+| Area | Old (broken) | New (correct) |
+|---|---|---|
+| `LessonResponse` fields | `topic`, `synopsis`, `key_concepts`, `language` | `title`, `sections: [{heading, body}]`, `key_points`, `lang`, `grade`, `has_audio` |
+| `test_content.py` fixture | `SAMPLE_LESSON` used old field names, assertions checked `data["topic"]` | Updated fixture and assertions to match `LessonResponse` schema |
+
+### Backend Bug Fixes
+
+| File | Fix |
+|---|---|
+| `backend/src/analytics/router.py` | `quiz_sessions` → `progress_sessions` (table does not exist as `quiz_sessions`); added `GET /analytics/student/stats` endpoint returning `{streak_days, session_dates, lessons_viewed, quizzes_completed, pass_rate, avg_score, audio_sessions, subject_breakdown}` |
+| `backend/src/reports/router.py` | Added `GET /reports/school/{school_id}/roster` endpoint returning per-student rows for Class Overview: `{student_id, student_name, grade, units_completed, total_units, avg_score_pct, last_active}` |
+| `backend/scripts/seed_dev_content.py` | New file: auto-seeds dev content on stack start; bypasses PgBouncer (connects directly to `db:5432`) to avoid silent insert loss from transaction-pooling mode; generates all 3 quiz sets per unit |
+| `docker-compose.yml` | Fixed migrate service command from YAML `>` fold (caused `sh: &&: unexpected` error) to JSON array format; added `./data:/data` and `content_store:/data/content` volumes; added auto-seed call on `APP_ENV=development` |
+
+### Frontend Bug Fixes
+
+| File | Fix |
+|---|---|
+| `web/lib/api/content.ts` | Added `BackendQuizResponse → QuizContent` mapping (backend uses `question_text`/`options[].text`/`correct_option`/`passing_score`; frontend expects `question`/`options[]`/`correct_index`/`pass_threshold`); added `BackendTutorialResponse → TutorialContent` mapping (backend uses `sections[].content`; frontend expects `steps[].body`) |
+| `web/lib/api/progress.ts` | Fixed endpoint URLs (`/progress/session/start` → `/progress/session`; `/progress/answer` → `/progress/session/{id}/answer`; `/progress/session/end` → `/progress/session/{id}/end`); fixed request body shapes; added `unit_progress` derivation from raw sessions (backend returns sessions list; frontend expected pre-derived unit statuses) |
+| `web/lib/api/reports.ts` | Changed `getClassMetrics` from `/analytics/school/${schoolId}/class` to `/reports/school/${schoolId}/roster` |
+| `web/components/content/QuizPlayer.tsx` | Added `correct_index` to `submitAnswer` call; fixed explanation source from `answerResult.explanation` to `question.explanation` |
+| `web/components/layout/StudentNav.tsx` | Replaced `<a href="/auth/logout">` with button that clears `localStorage` (`sb_token`) then navigates; prevents broken redirect on logout |
+| `web/components/layout/SchoolNav.tsx` | Fixed logout redirect from `/school/login` to `/api/auth/logout` |
+| `web/components/layout/AdminNav.tsx` | Added `?? ""` null guard on `usePathname()` to prevent crash during route transitions |
+| `web/app/(student)/curriculum/page.tsx` | Added `?.` optional chaining on `history?.unit_progress?.forEach(...)` to prevent crash when history is undefined |
+| `web/app/api/auth/logout/route.ts` | New file: clears `sb_dev_session` cookie and redirects all users to `/` (home page) |
+
+### Root Cause: PgBouncer Transaction-Pooling Silently Drops asyncpg Inserts
+
+`asyncpg` uses server-side prepared statements by default. PgBouncer in `transaction` pool mode discards these between connections, causing `execute()` calls to appear to succeed (no exception) but never commit data. **Fix:** Any script that inserts data (migrations, seed scripts) must connect directly to `db:5432`, not through `pgbouncer:5432`. The `migrate` service in docker-compose already did this by design (the comment in the file explains this); the seed script was fixed to match.
+
+*Last updated: 2026-03-28*

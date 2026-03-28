@@ -241,7 +241,7 @@ This is the cornerstone of the OnDemand architecture. All Claude API calls happe
 flowchart LR
     A(["Admin:\nbuild-grade\n--grade 8\n--lang en,fr,es"]) --> B["Load\ngrade8_stem.json"]
     B --> C{For each\nSubject → Unit}
-    C --> D["Call Claude:\nLesson synopsis\n+ key concepts\n→ lesson_{lang}.json"]
+    C --> D["Call Claude:\nLesson title\n+ sections + key points\n→ lesson_{lang}.json"]
     C --> E["Call Claude:\n3 quiz sets\n× 8 questions\n→ quiz_set_1/2/3_{lang}.json"]
     C --> F["Call Claude:\nTutorial for\ncommon wrong answers\n→ tutorial_{lang}.json"]
     C --> G{"Unit has\nlabs?"}
@@ -353,7 +353,7 @@ The pipeline prompt builders receive a `lang` parameter and instruct Claude to r
 
 ```python
 # pipeline/build_unit.py (sketch)
-text = lesson_data["synopsis"] + " " + " ".join(lesson_data["key_concepts"])
+text = lesson_data["title"] + " " + " ".join(s["body"] for s in lesson_data["sections"])
 audio_bytes = tts_client.synthesize(text, lang=lang, voice=TTS_VOICES[lang])
 content_store.write(f"{unit_id}/lesson_{lang}.mp3", audio_bytes)
 ```
@@ -861,6 +861,7 @@ Requires admin or teacher JWT. Permission column references `backend/src/core/pe
 | POST | `/analytics/lesson/start` | `{unit_id, curriculum_id}` → `{view_id}` |
 | POST | `/analytics/lesson/end` | `{view_id, duration_s, audio_played, experiment_viewed}` → `200` |
 | GET | `/analytics/student/me` | Student's own metrics (scores, time, attempts) |
+| GET | `/analytics/student/stats` | Student dashboard stats: `{streak_days, session_dates, lessons_viewed, quizzes_completed, pass_rate, avg_score, audio_sessions, subject_breakdown}` |
 | GET | `/analytics/school/{school_id}/class` | Aggregate class metrics per unit |
 | GET | `/analytics/unit/{unit_id}/summary` | Platform-wide metrics for a unit (admin only) |
 
@@ -885,6 +886,7 @@ All report endpoints require a teacher or school_admin JWT. Students cannot acce
 | GET | `/reports/school/{school_id}/curriculum-health` | All units ranked by health tier |
 | GET | `/reports/school/{school_id}/feedback?unit_id=&category=&reviewed=` | Feedback by unit |
 | GET | `/reports/school/{school_id}/trends?period=4w\|12w\|term` | Week-over-week trend data |
+| GET | `/reports/school/{school_id}/roster?grade=` | Per-student rows for Class Overview table: `{student_id, student_name, grade, units_completed, total_units, avg_score_pct, last_active}` |
 | POST | `/reports/school/{school_id}/export` | `{report_type, filters}` → `{download_url}` CSV |
 | GET | `/reports/school/{school_id}/alerts` | Active threshold alerts |
 | PUT | `/reports/school/{school_id}/alerts/settings` | Configure alert thresholds |
@@ -1396,9 +1398,9 @@ erDiagram
 ### Content (stored in Content Store, keyed by unit_id)
 ```
 {unit_id}/
-  lesson_en.json          ← synopsis + key concepts (English)
-  lesson_fr.json          ← synopsis + key concepts (French)
-  lesson_es.json          ← synopsis + key concepts (Spanish)
+  lesson_en.json          ← title + sections + key_points (English)
+  lesson_fr.json          ← title + sections + key_points (French)
+  lesson_es.json          ← title + sections + key_points (Spanish)
   lesson_en.mp3           ← TTS audio (English)
   lesson_fr.mp3           ← TTS audio (French)
   lesson_es.mp3           ← TTS audio (Spanish)
@@ -1553,7 +1555,7 @@ The platform targets **WCAG 2.1 Level AA** for all student-facing interfaces (mo
 - Progress indicators (streak, completion %) must be announced as text, not only rendered visually.
 
 **Audio / Media:**
-- Lesson audio (TTS MP3) must have a text alternative — the lesson `synopsis` text is always shown alongside the audio player.
+- Lesson audio (TTS MP3) must have a text alternative — the lesson `title` and `sections` text is always shown alongside the audio player.
 - Audio controls must be accessible via screen reader without sight.
 
 **Error Messages:**
@@ -1972,7 +1974,7 @@ Performance targets (SLOs) are defined in [BACKEND_ARCHITECTURE.md](BACKEND_ARCH
 ### Schema Validation
 
 After each Claude API call, the pipeline validates the response against a JSON schema before writing to the Content Store:
-- **Lesson:** `synopsis` (string, non-empty) + `key_concepts` (array, length ≥ 3)
+- **Lesson:** `title` (string, non-empty) + `sections` (array of `{heading, body}`, length ≥ 1) + `key_points` (array, length ≥ 3) + `grade` (int) + `lang` (string)
 - **Quiz set:** exactly 8 questions, each with `question`, `choices` (array of 4), `correct_answer` (0–3 int), `explanation`
 - **Tutorial:** `explanation` (string) + `worked_examples` (array, length ≥ 1)
 - **Experiment:** `steps` (array, length 5–10), each with `step_number`, `instruction`, `diagram_hint`, `expected_observation`
