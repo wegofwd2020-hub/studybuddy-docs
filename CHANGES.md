@@ -35,6 +35,9 @@ Tracks all decisions, design changes, and implementation milestones.
 | D-24 | AlexJS automated language analysis in the pipeline before human review | Catches insensitive language (profanity, gendered phrasing, ableist terms) at generation time; warnings feed review queue without blocking pipeline throughput |
 | D-25 | Content versioning at subject level, not unit level | Subject is the atomic publication unit; avoids partially reviewed content reaching students; rollback always restores a coherent subject snapshot |
 | D-26 | Block and publish require separate permission levels (`review:approve` vs `content:publish`) | Two-party check: a school_admin can approve for their school but only a product_admin can make it live on the platform |
+| D-27 | Bandit B608 (SQL injection) skipped globally | All DB queries use asyncpg `$N` positional parameters — bandit cannot distinguish parameterized queries from unsafe string interpolation; low-confidence false positives suppressed |
+| D-28 | Ruff B904/S608/E701 suppressed in existing codebase | Mass raise-from refactor deferred; SQL pattern same as D-27; inline ifs in service layer are pre-existing style, not new code |
+| D-29 | JavaScript dependencies pinned to exact versions (no `^`) | Reproducible builds; prevents minor-version surprises in CI; Dependabot PRs handle upgrades in a controlled way |
 
 ---
 
@@ -993,5 +996,47 @@ STRIPE_PRICE_ANNUAL_ID=price_...
 ### Root Cause: PgBouncer Transaction-Pooling Silently Drops asyncpg Inserts
 
 `asyncpg` uses server-side prepared statements by default. PgBouncer in `transaction` pool mode discards these between connections, causing `execute()` calls to appear to succeed (no exception) but never commit data. **Fix:** Any script that inserts data (migrations, seed scripts) must connect directly to `db:5432`, not through `pgbouncer:5432`. The `migrate` service in docker-compose already did this by design (the comment in the file explains this); the seed script was fixed to match.
+
+*Last updated: 2026-03-28*
+
+---
+
+## Code Quality & Security Tooling Phase
+
+**Date:** 2026-03-28
+**Branch:** feat/round-2-dev
+**Tests after phase:** 210 passed (unchanged)
+**Commit:** TBD
+
+### Files Created
+
+| File | Purpose |
+|---|---|
+| `backend/pyproject.toml` | Ruff (lint + format) and Bandit (SAST) config; coverage threshold 70% |
+| `.pre-commit-config.yaml` | Pre-commit hooks: file hygiene, detect-secrets, ruff, bandit, eslint, prettier |
+| `.secrets.baseline` | detect-secrets baseline (empty — no secrets committed) |
+| `.github/dependabot.yml` | Dependabot: pip (backend + pipeline), npm (web), GitHub Actions — weekly Monday |
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `backend/requirements.txt` | Added `ruff==0.9.10`, `bandit[toml]==1.8.3`, `pip-audit==2.7.3`, `pytest-cov==5.0.0` |
+| `.github/workflows/test.yml` | Full rewrite: 4 jobs (backend-lint, backend-test, frontend-lint, frontend-test); coverage threshold 70%; pip-audit + npm audit; eslint + prettier + typecheck in CI |
+| `web/package.json` | Pinned all `^` semver ranges to exact resolved versions from package-lock.json |
+| `backend/src/auth/tasks.py` | Added missing module-level `log = logging.getLogger("auth.tasks")`; fixed ambiguous variable name `l` → `lang` |
+| `backend/src/analytics/router.py` | Fixed unused `subj_rows` variable — now actually used to populate `subject_breakdown` response field |
+| `backend/src/content/router.py` | Removed truly unused `pool` variable; kept `redis` (used by quiz rotation) |
+| `backend/src/reports/service.py` | Removed unused `first_pass_count` and `first_att` variables |
+
+### Key Decisions
+
+- **Ruff over flake8/pylint** — single tool covers linting, import ordering, and formatting; 10× faster than pylint in CI
+- **Bandit B608 suppressed** — all SQL is asyncpg `$N` parameterized; false positive with Low confidence across 27 locations; noted in D-27
+- **B904/S608/E701 suppressed in ruff** — mass raise-from refactor not warranted; existing style; noted in D-28
+- **JS deps pinned** — exact versions resolved from existing package-lock.json; no install needed; Dependabot will handle upgrades going forward
+- **Backend lint gate blocks test job** — `backend-test` depends on `backend-lint`; prevents wasted infra spend on test runs with broken code
+- **Coverage threshold 70%** — set conservatively to match current coverage level; raise gradually as new tests are added
+- **pip-audit `--ignore-vuln PYSEC-2024-55`** — placeholder for any known acceptable vulnerability in pinned deps; remove once deps are upgraded
 
 *Last updated: 2026-03-28*
