@@ -18,14 +18,14 @@
 | Content Review & Approval | 14 | review:read / review:annotate / content:publish |
 | Progress | 5 | Student JWT |
 | Subscription | 4 | Student JWT / Public (webhook) |
-| School & Teacher | 5 | Teacher JWT / school_admin JWT |
+| School & Teacher | 9 | Teacher JWT / school_admin JWT |
 | Curriculum Upload & Pipeline | 6 | school_admin JWT / Admin JWT |
 | Analytics | 6 | Student JWT / Teacher JWT / Admin JWT |
 | Feedback | 2 | Student JWT / Admin JWT |
 | Reports | 12 | Teacher JWT / school_admin JWT |
 | Demo | 5 | Public / Demo token |
 | Observability | 3 | Public (/healthz, /readyz) / Bearer (/metrics) |
-| **Total** | **91** | |
+| **Total** | **95** | |
 
 ---
 
@@ -321,14 +321,25 @@ POST   /schools/{school_id}/teachers/invite  school_admin JWT
          Returns: 200  ← sends invite email via SES
 
 POST   /schools/{school_id}/enrolment        school_admin JWT
-         Body:  {student_emails: [str]}
-         Returns: {enrolled, already_enrolled, not_found}
-
-DELETE /schools/{school_id}/enrolment/{student_email}  school_admin JWT
-         Returns: 200
+         Body:  {students: [{email, grade?, teacher_id?}]}
+         Returns: {enrolled, already_enrolled, errors: [{email, reason}]}
+         Notes: grade+teacher_id optional at upload; set later via assignment endpoint
 
 GET    /schools/{school_id}/enrolment        school_admin JWT
-         Returns: roster with status per student
+         Returns: roster with status, assigned_teacher_id, assigned_grade per student
+
+GET    /schools/{school_id}/students/{student_id}/assignment  Teacher JWT
+         Returns: StudentAssignmentResponse
+
+PUT    /schools/{school_id}/students/{student_id}/assignment  school_admin JWT
+         Body:  {teacher_id, grade}
+         Returns: StudentAssignmentResponse
+         Notes: school is sole authority on grade; student self-change blocked
+
+POST   /schools/{school_id}/teachers/{from_teacher_id}/reassign  school_admin JWT
+         Body:  {to_teacher_id, grade}
+         Returns: {reassigned: int}
+         Notes: moves all students in a grade from one teacher to another
 ```
 
 ---

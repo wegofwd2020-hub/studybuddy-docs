@@ -97,7 +97,7 @@ The Free edition remains a useful standalone tool and a reference implementation
 | 8 | Logical / Domain Model (DDD) | [docs/DOMAIN_MODEL.md](docs/DOMAIN_MODEL.md) | ✅ |
 | 9 | CI/CD Pipeline | [docs/CICD_PIPELINE.md](docs/CICD_PIPELINE.md) | ✅ |
 | 10 | Event Schemas | [docs/EVENT_SCHEMAS.md](docs/EVENT_SCHEMAS.md) | ✅ |
-| 11 | API / Proto Index (91 endpoints) | [docs/API_INDEX.md](docs/API_INDEX.md) | ✅ |
+| 11 | API / Proto Index (95 endpoints) | [docs/API_INDEX.md](docs/API_INDEX.md) | ✅ |
 
 ---
 
