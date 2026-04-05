@@ -68,6 +68,24 @@ The Free edition remains a useful standalone tool and a reference implementation
 
 ---
 
+## Architecture Diagrams (Rule 17 — all 11 required diagrams)
+
+| # | Diagram | File | Status |
+|---|---|---|---|
+| 1 | System Design (C4 L1 + Container) | [ARCHITECTURE.md §System Overview](ARCHITECTURE.md#system-overview) | ✅ |
+| 2 | Package / Component (C4 L3) | [ARCHITECTURE.md §Backend Component](ARCHITECTURE.md#backend-component-diagram-c4-level-3) | ✅ |
+| 3 | Service Dependencies + SLAs | [docs/SERVICE_DEPENDENCIES.md](docs/SERVICE_DEPENDENCIES.md) | ✅ |
+| 4 | Deployment (ECS + K8s + env progression) | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | ✅ |
+| 5 | Network & Security Zones | [docs/NETWORK_SECURITY.md](docs/NETWORK_SECURITY.md) | ✅ |
+| 6 | Database ER | [ARCHITECTURE.md §Entity Relationship Diagram](ARCHITECTURE.md#entity-relationship-diagram) | ✅ |
+| 7 | Sequence Diagrams (auth + content) | [ARCHITECTURE.md §Student Flow](ARCHITECTURE.md#student-flow-updated) | ✅ |
+| 8 | Logical / Domain Model (DDD) | [docs/DOMAIN_MODEL.md](docs/DOMAIN_MODEL.md) | ✅ |
+| 9 | CI/CD Pipeline | [docs/CICD_PIPELINE.md](docs/CICD_PIPELINE.md) | ✅ |
+| 10 | Event Schemas | [docs/EVENT_SCHEMAS.md](docs/EVENT_SCHEMAS.md) | ✅ |
+| 11 | API / Proto Index (91 endpoints) | [docs/API_INDEX.md](docs/API_INDEX.md) | ✅ |
+
+---
+
 ## Getting Started (Documentation Phase)
 
 Full implementation has not begun. To understand the system:
