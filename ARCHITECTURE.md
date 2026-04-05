@@ -1222,8 +1222,25 @@ erDiagram
         uuid school_id FK
         string student_email
         uuid student_id FK
-        string status
+        string status "pending|active"
+        int grade "nullable; set at enrolment or by school admin"
+        uuid teacher_id FK "nullable; initial assignment hint"
         timestamp added_at
+    }
+    TEACHER_GRADE_ASSIGNMENT {
+        uuid assignment_id PK
+        uuid teacher_id FK
+        uuid school_id FK
+        int grade "5–12; UNIQUE(teacher_id, grade)"
+    }
+    STUDENT_TEACHER_ASSIGNMENT {
+        uuid assignment_id PK
+        uuid student_id FK
+        uuid teacher_id FK
+        uuid school_id FK
+        int grade "5–12; UNIQUE(student_id, grade)"
+        uuid assigned_by FK "teacher who made the assignment"
+        timestamp assigned_at
     }
     SUBSCRIPTION {
         uuid subscription_id PK
@@ -1290,8 +1307,12 @@ erDiagram
     SCHOOL ||--o{ TEACHER : "employs"
     SCHOOL ||--o{ CURRICULUM : "owns"
     SCHOOL ||--o{ SCHOOL_ENROLMENT : "roster"
+    SCHOOL ||--o{ STUDENT_TEACHER_ASSIGNMENT : "manages"
     CURRICULUM ||--o{ CURRICULUM_UNIT : "contains"
     STUDENT ||--o{ SCHOOL_ENROLMENT : "linked via"
+    STUDENT ||--o{ STUDENT_TEACHER_ASSIGNMENT : "assigned in"
+    TEACHER ||--o{ TEACHER_GRADE_ASSIGNMENT : "teaches"
+    TEACHER ||--o{ STUDENT_TEACHER_ASSIGNMENT : "assigned"
     STUDENT ||--o| SUBSCRIPTION : "has"
     STUDENT ||--o{ SESSION : "takes"
     SESSION ||--o{ PROGRESS_ANSWER : "records"
