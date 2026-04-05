@@ -68,6 +68,21 @@ The Free edition remains a useful standalone tool and a reference implementation
 
 ---
 
+## Key Documents
+
+| Document | Purpose |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, data models, API contracts, phase plan |
+| [BACKEND_ARCHITECTURE.md](BACKEND_ARCHITECTURE.md) | Caching, hot path, SLOs, deployment topologies |
+| [UX_GOALS.md](UX_GOALS.md) | North star UX goals per persona — use as a prioritisation filter |
+| [REQUIREMENTS.md](REQUIREMENTS.md) | Requirement IDs and status |
+| [AGENTS.md](AGENTS.md) | AI agent onboarding, conventions, pitfalls |
+| [CHANGES.md](CHANGES.md) | Design decisions log |
+| [OPERATIONS.md](OPERATIONS.md) | Runbooks, incident response |
+| [SCALABILITY.md](SCALABILITY.md) | Capacity planning, multi-region |
+
+---
+
 ## Architecture Diagrams (Rule 17 — all 11 required diagrams)
 
 | # | Diagram | File | Status |
